@@ -7,9 +7,9 @@ name = "jrpc-core"
 dynamic = ["version"]
 description = ''
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 license = "MIT"
-keywords = []
+keywords = ["json-rpc", "jsonrpc", "rpc"]
 authors = [
   { name = "comet11x", email = "comet11x@protonmail.com" },
 ]
@@ -24,7 +24,10 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = []
+dependencies = [
+    "pydantic>=2.13.4",
+    "pyfplib>=0.2.3",
+]
 
 [project.urls]
 Documentation = "https://github.com/comet11x/jrpc-core#readme"

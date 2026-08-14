@@ -54,7 +54,7 @@ class JsonRpcRequest(BaseModel):
         return value
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Result[JsonRpcRequest, Exception]:
+    def try_from_dict(cls, data: dict[str, Any]) -> Result[JsonRpcRequest, Exception]:
         """Parse a request from a dict, returning a ``Result`` instead of raising."""
         try:
             return Ok(cls.model_validate(data))
@@ -62,7 +62,7 @@ class JsonRpcRequest(BaseModel):
             return Err(exc)
 
     @classmethod
-    def from_json(cls, data: str) -> Result[JsonRpcRequest, Exception]:
+    def try_from_json(cls, data: str) -> Result[JsonRpcRequest, Exception]:
         """Parse a request from a JSON string, returning a ``Result`` instead of raising."""
         try:
             return Ok(cls.model_validate_json(data))
@@ -79,11 +79,8 @@ class JsonRpcRequest(BaseModel):
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
 
-    def make_error(self, error: JsonRpcError) -> JsonRpcResponse:
-        return JsonRpcResponse(id=self.id, error=error)
-
-    def make_response(self, result: Any) -> JsonRpcResponse:
-        return JsonRpcResponse(id=self.id, result=result)
+    def into(self, result: Result[Any, JsonRpcError]) -> JsonRpcResponse:
+        return JsonRpcResponse.from_result(self.id, result)
 
 
 class JsonRpcNotification(BaseModel):
@@ -108,7 +105,9 @@ class JsonRpcNotification(BaseModel):
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Result[JsonRpcNotification, Exception]:
+    def try_from_dict(
+        cls, data: dict[str, Any]
+    ) -> Result[JsonRpcNotification, Exception]:
         """Parse a notification from a dict, returning a ``Result`` instead of raising."""
         try:
             return Ok(cls.model_validate(data))
@@ -116,7 +115,7 @@ class JsonRpcNotification(BaseModel):
             return Err(exc)
 
     @classmethod
-    def from_json(cls, data: str) -> Result[JsonRpcNotification, Exception]:
+    def try_from_json(cls, data: str) -> Result[JsonRpcNotification, Exception]:
         """Parse a notification from a JSON string, returning a ``Result`` instead of raising."""
         try:
             return Ok(cls.model_validate_json(data))
@@ -145,7 +144,7 @@ class JsonRpcResponse(BaseModel):
     @field_validator("error")
     @classmethod
     def _validate_error(cls, error: JsonRpcError) -> JsonRpcError:
-        if error is not None:
+        if not isinstance(error, JsonRpcError):
             if "code" not in error or "message" not in error:
                 raise ValueError("error must contain 'code' and 'message'")
             if not isinstance(error.code, int) or not isinstance(error.message, str):
@@ -163,24 +162,25 @@ class JsonRpcResponse(BaseModel):
         return self
 
     @staticmethod
-    def from_result(id: JsonRpcId, result: Any) -> JsonRpcResponse:
-        """Build a successful response carrying ``result``."""
-        return JsonRpcResponse(id=id, result=result)
+    def from_result(
+        id: JsonRpcId, result: Result[Any, JsonRpcError]
+    ) -> JsonRpcResponse:
+        return (
+            JsonRpcResponse(id=id, result=result.unwrap())
+            if result.is_ok()
+            else JsonRpcResponse(id=id, error=result.unwrap_err())
+        )
 
     @staticmethod
-    def from_error(
-        req: JsonRpcRequest,
-        error: JsonRpcError,
-    ) -> JsonRpcResponse:
-        """Build an error response from a ``code``, ``message``, and optional ``data``."""
+    def from_jrpc_error(id: JsonRpcId, error: JsonRpcError) -> JsonRpcResponse:
         return JsonRpcResponse(id=id, error=error)
 
     @staticmethod
-    def from_request(req: JsonRpcRequest, response: Any) -> JsonRpcResponse:
-        return JsonRpcResponse(id=req.id, response=response)
+    def from_jrpc_result(id: JsonRpcId, result: Any) -> JsonRpcResponse:
+        return JsonRpcResponse(id=id, result=result)
 
     @staticmethod
-    def from_dict(data: dict[str, Any]) -> Result[JsonRpcResponse, Exception]:
+    def try_from_dict(data: dict[str, Any]) -> Result[JsonRpcResponse, Exception]:
         """Parse a response from a dict, returning a ``Result`` instead of raising."""
         try:
             return Ok(JsonRpcResponse.model_validate(data))
@@ -188,7 +188,7 @@ class JsonRpcResponse(BaseModel):
             return Err(exc)
 
     @staticmethod
-    def from_json(data: str) -> Result[JsonRpcResponse, Exception]:
+    def try_from_json(data: str) -> Result[JsonRpcResponse, Exception]:
         """Parse a response from a JSON string, returning a ``Result`` instead of raising."""
         try:
             return Ok(JsonRpcResponse.model_validate_json(data))
@@ -206,3 +206,11 @@ class JsonRpcResponse(BaseModel):
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
+
+
+def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]:
+    return (
+        Result.try_call(JsonRpcRequest.try_from_json, data)
+        .map_err(lambda _: Result.try_call(JsonRpcNotification.try_from_json, data))
+        .flatten()
+    )

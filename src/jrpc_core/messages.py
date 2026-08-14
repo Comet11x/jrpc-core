@@ -5,34 +5,35 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Union
+from typing import Any
 from uuid import uuid4
+import json
 from pydantic import BaseModel, field_validator, model_validator
 from pyfplib import Err, Ok, Result
 from enum import Enum, StrEnum
 
-JsonId = Union[str, int, float, None]
-JsonParams = Union[dict[str, Any], list[Any], None]
-# JsonError = Union[dict[str, Any], None]
+JsonRpcId = str | int | float | None
+JsonRpcParams = dict[str, Any] | list[Any] | None
 
 
-class JsonErrorCode(Enum):
+class JsonRpcErrorCode(Enum):
     ParseError = -32700
     InvalidRequest = -32600
     MethodNotFound = -32601
     InvalidParams = -32602
     InternalError = -32603
 
+    def __int__(self):
+        return self.value
 
-class JsonRpcVersion(StrEnum)
+
+class JsonRpcVersion(StrEnum):
     Version1 = "1.0"
     Version2 = "2.0"
 
-JsonVersion = Literal[JsonRpcVersion.Version1, JsonRpcVersion.Version2]
 
-
-class JsonError(BaseModel):
-    code: JsonErrorCode = JsonErrorCode.InternalError
+class JsonRpcError(BaseModel):
+    code: JsonRpcErrorCode | int = JsonRpcErrorCode.InternalError
     message: str = "Something went wrong"
     data: Any | None = None
 
@@ -41,9 +42,9 @@ class JsonRpcRequest(BaseModel):
     """A JSON-RPC 2.0 request: ``{"jsonrpc": "2.0", "method": ..., "params": ..., "id": ...}``."""
 
     method: str
-    id: JsonId = str(uuid4())
-    params: JsonParams = None
-    jsonrpc: JsonVersion = JsonRpcVersion.Version2
+    id: JsonRpcId = str(uuid4())
+    params: JsonRpcParams = None
+    jsonrpc: JsonRpcVersion = JsonRpcVersion.Version2
 
     @field_validator("method", mode="before")
     @classmethod
@@ -75,7 +76,10 @@ class JsonRpcRequest(BaseModel):
             data.pop("params", None)
         return data
 
-    def make_error(self, error: JsonError) -> JsonRpcResponse:
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+    def make_error(self, error: JsonRpcError) -> JsonRpcResponse:
         return JsonRpcResponse(id=self.id, error=error)
 
     def make_response(self, result: Any) -> JsonRpcResponse:
@@ -86,8 +90,8 @@ class JsonRpcNotification(BaseModel):
     """A JSON-RPC 2.0 notification: a request without an ``id`` (no response expected)."""
 
     method: str
-    params: JsonParams = None
-    jsonrpc: JsonVersion = JsonRpcVersion.Version2
+    params: JsonRpcParams = None
+    jsonrpc: JsonRpcVersion = JsonRpcVersion.Version2
 
     @field_validator("method", mode="before")
     @classmethod
@@ -126,24 +130,25 @@ class JsonRpcNotification(BaseModel):
             data.pop("params", None)
         return data
 
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
 
 class JsonRpcResponse(BaseModel):
     """A JSON-RPC 2.0 response: carries exactly one of ``result`` or ``error`` plus an ``id``."""
 
-    id: JsonId
+    id: JsonRpcId
     result: Any = None
-    error: JsonError | None = None
-    jsonrpc: JsonVersion = JsonRpcVersion.Version2
+    error: JsonRpcError | None = None
+    jsonrpc: JsonRpcVersion = JsonRpcVersion.Version2
 
     @field_validator("error")
     @classmethod
-    def _validate_error(cls, error: JsonError) -> JsonError:
+    def _validate_error(cls, error: JsonRpcError) -> JsonRpcError:
         if error is not None:
             if "code" not in error or "message" not in error:
                 raise ValueError("error must contain 'code' and 'message'")
-            if not isinstance(error.code, int) or not isinstance(
-                error.message, str
-            ):
+            if not isinstance(error.code, int) or not isinstance(error.message, str):
                 raise TypeError(
                     "error 'code' must be an int and 'message' must be a str"
                 )
@@ -157,38 +162,36 @@ class JsonRpcResponse(BaseModel):
             )
         return self
 
-    @classmethod
-    def from_result(cls, id: JsonId, result: Any) -> JsonRpcResponse:
+    @staticmethod
+    def from_result(id: JsonRpcId, result: Any) -> JsonRpcResponse:
         """Build a successful response carrying ``result``."""
-        return cls(id=id, result=result)
+        return JsonRpcResponse(id=id, result=result)
 
-    @classmethod
+    @staticmethod
     def from_error(
-        cls,
-        id: JsonId,
-        code: int,
-        message: str,
-        data: Any = None,
+        req: JsonRpcRequest,
+        error: JsonRpcError,
     ) -> JsonRpcResponse:
         """Build an error response from a ``code``, ``message``, and optional ``data``."""
-        error: dict[str, Any] = {"code": code, "message": message}
-        if data is not None:
-            error["data"] = data
-        return cls(id=id, error=error)
+        return JsonRpcResponse(id=id, error=error)
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Result[JsonRpcResponse, Exception]:
+    @staticmethod
+    def from_request(req: JsonRpcRequest, response: Any) -> JsonRpcResponse:
+        return JsonRpcResponse(id=req.id, response=response)
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> Result[JsonRpcResponse, Exception]:
         """Parse a response from a dict, returning a ``Result`` instead of raising."""
         try:
-            return Ok(cls.model_validate(data))
+            return Ok(JsonRpcResponse.model_validate(data))
         except Exception as exc:
             return Err(exc)
 
-    @classmethod
-    def from_json(cls, data: str) -> Result[JsonRpcResponse, Exception]:
+    @staticmethod
+    def from_json(data: str) -> Result[JsonRpcResponse, Exception]:
         """Parse a response from a JSON string, returning a ``Result`` instead of raising."""
         try:
-            return Ok(cls.model_validate_json(data))
+            return Ok(JsonRpcResponse.model_validate_json(data))
         except Exception as exc:
             return Err(exc)
 
@@ -200,3 +203,6 @@ class JsonRpcResponse(BaseModel):
         else:
             data.pop("error", None)
         return data
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())

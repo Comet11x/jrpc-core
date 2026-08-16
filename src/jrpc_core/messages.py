@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
-from typing import Any
-from uuid import uuid4
 import json
-from pydantic import BaseModel, field_validator, model_validator
-from pyfplib import Err, Ok, Result
 from enum import Enum, StrEnum
+from typing import Any, cast
+from uuid import uuid4
+
+from pydantic import BaseModel, field_validator, model_validator
+from pyfplib import Nothing, Option, Result, Some
 
 JsonRpcId = str | int | float | None
 JsonRpcParams = dict[str, Any] | list[Any] | None
@@ -26,6 +27,10 @@ class JsonRpcErrorCode(Enum):
     def __int__(self):
         return self.value
 
+    @staticmethod
+    def default() -> JsonRpcErrorCode:
+        return JsonRpcErrorCode.InternalError
+
 
 class JsonRpcVersion(StrEnum):
     Version1 = "1.0"
@@ -33,9 +38,30 @@ class JsonRpcVersion(StrEnum):
 
 
 class JsonRpcError(BaseModel):
-    code: JsonRpcErrorCode | int = JsonRpcErrorCode.InternalError
+    code: JsonRpcErrorCode | int = JsonRpcErrorCode.default()
     message: str = "Something went wrong"
     data: Any | None = None
+
+    @staticmethod
+    def default() -> JsonRpcError:
+        return JsonRpcError(code=JsonRpcErrorCode.default())
+
+    @staticmethod
+    def into(value: JsonRpcError | Any) -> JsonRpcError:
+        if isinstance(value, JsonRpcError):
+            return value
+        else:
+            maybe_code: Option[int] = Result.try_call(cast(Any, value), "code").ok()
+            code = (
+                int(maybe_code.unwrap())
+                if maybe_code.is_some()
+                else JsonRpcErrorCode.InternalError
+            )
+            return JsonRpcError(code=code, data=value)
+
+    @staticmethod
+    def try_into(value: Option[JsonRpcError | Any]) -> Option[JsonRpcError]:
+        return Some(JsonRpcError.into(value.unwrap())) if value.is_some() else Nothing()
 
 
 class JsonRpcRequest(BaseModel):
@@ -55,19 +81,11 @@ class JsonRpcRequest(BaseModel):
 
     @classmethod
     def try_from_dict(cls, data: dict[str, Any]) -> Result[JsonRpcRequest, Exception]:
-        """Parse a request from a dict, returning a ``Result`` instead of raising."""
-        try:
-            return Ok(cls.model_validate(data))
-        except Exception as exc:
-            return Err(exc)
+        return Result.try_call(cls.model_validate, data)
 
     @classmethod
     def try_from_json(cls, data: str) -> Result[JsonRpcRequest, Exception]:
-        """Parse a request from a JSON string, returning a ``Result`` instead of raising."""
-        try:
-            return Ok(cls.model_validate_json(data))
-        except Exception as exc:
-            return Err(exc)
+        return Result.try_call(cls.model_validate_json, data)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict, omitting the optional ``params`` when absent."""
@@ -108,19 +126,11 @@ class JsonRpcNotification(BaseModel):
     def try_from_dict(
         cls, data: dict[str, Any]
     ) -> Result[JsonRpcNotification, Exception]:
-        """Parse a notification from a dict, returning a ``Result`` instead of raising."""
-        try:
-            return Ok(cls.model_validate(data))
-        except Exception as exc:
-            return Err(exc)
+        return Result.try_call(cls.model_validate, data)
 
     @classmethod
     def try_from_json(cls, data: str) -> Result[JsonRpcNotification, Exception]:
-        """Parse a notification from a JSON string, returning a ``Result`` instead of raising."""
-        try:
-            return Ok(cls.model_validate_json(data))
-        except Exception as exc:
-            return Err(exc)
+        return Result.try_call(cls.model_validate_json, data)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict, omitting the optional ``params`` when absent."""
@@ -181,25 +191,19 @@ class JsonRpcResponse(BaseModel):
 
     @staticmethod
     def try_from_dict(data: dict[str, Any]) -> Result[JsonRpcResponse, Exception]:
-        """Parse a response from a dict, returning a ``Result`` instead of raising."""
-        try:
-            return Ok(JsonRpcResponse.model_validate(data))
-        except Exception as exc:
-            return Err(exc)
+        return Result.try_call(JsonRpcResponse.model_validate, data)
 
     @staticmethod
     def try_from_json(data: str) -> Result[JsonRpcResponse, Exception]:
-        """Parse a response from a JSON string, returning a ``Result`` instead of raising."""
-        try:
-            return Ok(JsonRpcResponse.model_validate_json(data))
-        except Exception as exc:
-            return Err(exc)
+        return Result.try_call(JsonRpcResponse.model_validate_json, data)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict, carrying exactly one of ``result`` or ``error``."""
         data = self.model_dump()
         if self.error is not None:
             data.pop("result", None)
+            data["error"]["code"] = int(
+                data["error"].get("code", JsonRpcErrorCode.default())
+            )
         else:
             data.pop("error", None)
         return data

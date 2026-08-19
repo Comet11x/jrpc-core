@@ -9,10 +9,19 @@ from jrpc_core.messages import (
     JsonRpcVersion,
 )
 
+from jrpc_core.dispatcher import (
+    JsonRpcDispatcher,
+    JsonRpcMethodWrapper,
+    JsonRpcHandlerCollection,
+)
+
 __all__ = [
-    "JsonRpcRequest",
-    "JsonRpcResponse",
-    "JsonRpcNotification",
-    "JsonRpcError",
-    "JsonRpcVersion",
+    JsonRpcRequest.__name__,
+    JsonRpcResponse.__name__,
+    JsonRpcNotification.__name__,
+    JsonRpcError.__name__,
+    JsonRpcVersion.__name__,
+    JsonRpcDispatcher.__name__,
+    JsonRpcMethodWrapper.__name__,
+    JsonRpcHandlerCollection.__name__,
 ]

@@ -19,17 +19,36 @@ JsonRpcParams = dict[str, Any] | list[Any] | None
 
 class JsonRpcErrorCode(Enum):
     ParseError = -32700
-    InvalidRequest = -32600
-    MethodNotFound = -32601
-    InvalidParams = -32602
     InternalError = -32603
+    InvalidParams = -32602
+    MethodNotFound = -32601
+    InvalidRequest = -32600
+    ExecutionError = -32000
 
     def __int__(self):
         return self.value
 
+    def description(self) -> str:
+        if self == JsonRpcErrorCode.ParseError:
+            return "Parse error"
+        elif self == JsonRpcErrorCode.InternalError:
+            return "Internal error"
+        elif self == JsonRpcErrorCode.InvalidParams:
+            return "Invalid params"
+        elif self == JsonRpcErrorCode.MethodNotFound:
+            return "Method not found"
+        elif self == JsonRpcErrorCode.InvalidRequest:
+            return "Invalid Request"
+        else:
+            # elif self == JsonRpcErrorCode.ExecutionError:
+            return "Execution error"
+
     @staticmethod
     def default() -> JsonRpcErrorCode:
         return JsonRpcErrorCode.InternalError
+
+    def into(self, data: Any = None) -> JsonRpcError:
+        return JsonRpcError(code=self, message=self.description(), data=data)
 
 
 class JsonRpcVersion(StrEnum):
@@ -47,21 +66,28 @@ class JsonRpcError(BaseModel):
         return JsonRpcError(code=JsonRpcErrorCode.default())
 
     @staticmethod
-    def into(value: JsonRpcError | Any) -> JsonRpcError:
-        if isinstance(value, JsonRpcError):
-            return value
+    def from_error(error: JsonRpcError | Any) -> JsonRpcError:
+        if isinstance(error, JsonRpcError):
+            return error
         else:
-            maybe_code: Option[int] = Result.try_call(cast(Any, value), "code").ok()
+            maybe_code: Option[int] = Result.try_call(
+                getattr, cast(Any, error), "code"
+            ).ok()
             code = (
                 int(maybe_code.unwrap())
                 if maybe_code.is_some()
                 else JsonRpcErrorCode.InternalError
             )
-            return JsonRpcError(code=code, data=value)
+            message = (
+                code.description()
+                if isinstance(code, JsonRpcErrorCode)
+                else "Unknown error"
+            )
+            return JsonRpcError(code=code, message=message, data=error)
 
     @staticmethod
-    def try_into(value: Option[JsonRpcError | Any]) -> Option[JsonRpcError]:
-        return Some(JsonRpcError.into(value.unwrap())) if value.is_some() else Nothing()
+    def try_from(value: Option[JsonRpcError | Any]) -> Option[JsonRpcError]:
+        return value.map(lambda err: JsonRpcError.from_error(err))
 
 
 class JsonRpcRequest(BaseModel):
@@ -98,7 +124,12 @@ class JsonRpcRequest(BaseModel):
         return json.dumps(self.to_dict())
 
     def into(self, result: Result[Any, JsonRpcError]) -> JsonRpcResponse:
-        return JsonRpcResponse.from_result(self.id, result)
+        if isinstance(result, Result):
+            return JsonRpcResponse.from_result(self.id, result)
+        elif isinstance(result, JsonRpcError):
+            return JsonRpcResponse.from_jrpc_error(self.id, result)
+        else:
+            return JsonRpcResponse.from_jrpc_result(self.id, result)
 
 
 class JsonRpcNotification(BaseModel):

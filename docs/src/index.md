@@ -14,10 +14,10 @@ hero:
       link: /guide/messages
 
 features:
-  - title: Pydantic Models
+  - title: <span class="mdi mdi-file-document-outline"></span> Pydantic Models
     details: Request, response, notification, and error models with full validation and serialisation.
-  - title: Type-Safe Dispatching
+  - title: <span class="mdi mdi-shuffle-variant"></span> Type-Safe Dispatching
     details: Route incoming JSON-RPC messages to registered handlers with automatic parameter validation.
-  - title: Functional Error Handling
+  - title: <span class="mdi mdi-shield-check-outline"></span> Functional Error Handling
     details: Powered by pyfplib Result and Option types for explicit, composable error flows.
 ---

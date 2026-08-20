@@ -5,7 +5,7 @@ export default defineConfig({
   description: "JSON-RPC 2.0 for Python — messages, dispatching, and validation.",
   srcDir: "src",
   outDir: "dist",
-  base: "/jrpc-core",
+  base: "/jrpc-core/",
 
   locales: {
     root: {

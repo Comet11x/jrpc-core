@@ -34,8 +34,22 @@ Documentation = "https://github.com/comet11x/jrpc-core#readme"
 Issues = "https://github.com/comet11x/jrpc-core/issues"
 Source = "https://github.com/comet11x/jrpc-core"
 
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0",
+  "pytest-cov>=6.0.0",
+]
+
 [tool.hatch.version]
 path = "src/jrpc_core/__about__.py"
+
+[tool.hatch.envs.test]
+extra-dependencies = [
+  "pytest>=8.0.0",
+  "pytest-cov>=6.0.0",
+]
+[tool.hatch.envs.test.scripts]
+run = "pytest {args:tests}"
 
 [tool.hatch.envs.types]
 extra-dependencies = [

@@ -1,3 +1,3 @@
-# SPDX-FileCopyrightText: 2026-present comet11x <comet11x@protonmail.com>
+# SPDX-FileCopyrightText: 2026-present U.N. Owen <void@some.where>
 #
 # SPDX-License-Identifier: MIT

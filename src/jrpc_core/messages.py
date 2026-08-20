@@ -1,7 +1,20 @@
 # SPDX-FileCopyrightText: 2026-present comet11x <comet11x@protonmail.com>
 #
 # SPDX-License-Identifier: MIT
-"""JSON-RPC 2.0 message primitives: requests, responses, and notifications."""
+"""JSON-RPC 2.0 message primitives: requests, responses, and notifications.
+
+This module provides Pydantic models and enumerations for constructing,
+validating, and serialising JSON-RPC 2.0 messages as defined in
+`the JSON-RPC 2.0 specification <https://www.jsonrpc.org/specification>`_.
+
+Typical usage::
+
+    from jrpc_core.messages import JsonRpcRequest, JsonRpcResponse
+
+    request = JsonRpcRequest(method="add", params=[1, 2])
+    response = request.into(Result.ok(3))
+    print(response.to_json())
+"""
 
 from __future__ import annotations
 
@@ -14,21 +27,55 @@ from pydantic import BaseModel, field_validator, model_validator
 from pyfplib import Nothing, Option, Result, Some
 
 JsonRpcId = str | int | float | None
+"""Type alias for a JSON-RPC message identifier.
+
+A valid identifier is a ``str``, ``int``, ``float``, or ``None``.
+The ``None`` variant is permitted only in notifications.
+"""
+
 JsonRpcParams = dict[str, Any] | list[Any] | None
+"""Type alias for JSON-RPC ``params`` values.
+
+Parameters may be a named mapping (``dict``), a positional list (``list``),
+or ``None`` when omitted.
+"""
 
 
 class JsonRpcErrorCode(Enum):
-    ParseError = -32700
-    InternalError = -32603
-    InvalidParams = -32602
-    MethodNotFound = -32601
-    InvalidRequest = -32600
-    ExecutionError = -32000
+    """Enumeration of standard JSON-RPC 2.0 error codes.
 
-    def __int__(self):
+    Each member maps to the integer code defined by the specification or
+    common extensions (``-32xxx`` reserved, ``-320xx`` server-defined).
+    """
+
+    ParseError = -32700
+    """Invalid JSON was received by the server."""
+
+    InternalError = -32603
+    """An internal JSON-RPC error occurred."""
+
+    InvalidParams = -32602
+    """The parameters sent with the method are invalid."""
+
+    MethodNotFound = -32601
+    """The method does not exist or is not available."""
+
+    InvalidRequest = -32600
+    """The JSON sent is not a valid request object."""
+
+    ExecutionError = -32000
+    """A server-defined execution error occurred."""
+
+    def __int__(self) -> int:
+        """Return the integer value of this error code."""
         return self.value
 
     def description(self) -> str:
+        """Return a human-readable description of this error code.
+
+        Returns:
+            A short English sentence describing the error.
+        """
         if self == JsonRpcErrorCode.ParseError:
             return "Parse error"
         elif self == JsonRpcErrorCode.InternalError:
@@ -45,28 +92,72 @@ class JsonRpcErrorCode(Enum):
 
     @staticmethod
     def default() -> JsonRpcErrorCode:
+        """Return the default error code used when no other code is appropriate.
+
+        Returns:
+            :attr:`InternalError`.
+        """
         return JsonRpcErrorCode.InternalError
 
     def into(self, data: Any = None) -> JsonRpcError:
+        """Create a :class:`JsonRpcError` from this code.
+
+        Args:
+            data: Optional extra payload attached to the error.
+
+        Returns:
+            A new :class:`JsonRpcError` with this code and its description.
+        """
         return JsonRpcError(code=self, message=self.description(), data=data)
 
 
 class JsonRpcVersion(StrEnum):
+    """Supported JSON-RPC protocol versions."""
+
     Version1 = "1.0"
+    """JSON-RPC 1.0."""
+
     Version2 = "2.0"
+    """JSON-RPC 2.0 (default)."""
 
 
 class JsonRpcError(BaseModel):
+    """A JSON-RPC 2.0 error object.
+
+    Attributes:
+        code: An integer error code, typically a :class:`JsonRpcErrorCode` member.
+        message: A short human-readable description of the error.
+        data: Optional extra information about the error.
+    """
+
     code: JsonRpcErrorCode | int = JsonRpcErrorCode.default()
     message: str = "Something went wrong"
     data: Any | None = None
 
     @staticmethod
     def default() -> JsonRpcError:
+        """Return a default error with :attr:`JsonRpcErrorCode.InternalError`.
+
+        Returns:
+            A new :class:`JsonRpcError` with the default code and message.
+        """
         return JsonRpcError(code=JsonRpcErrorCode.default())
 
     @staticmethod
     def from_error(error: JsonRpcError | Any) -> JsonRpcError:
+        """Convert an arbitrary value into a :class:`JsonRpcError`.
+
+        If *error* is already a :class:`JsonRpcError` it is returned as-is.
+        Otherwise the function attempts to extract a ``code`` attribute and
+        builds an error around it, falling back to
+        :attr:`JsonRpcErrorCode.InternalError`.
+
+        Args:
+            error: The value to convert.
+
+        Returns:
+            A :class:`JsonRpcError` instance.
+        """
         if isinstance(error, JsonRpcError):
             return error
         else:
@@ -87,11 +178,29 @@ class JsonRpcError(BaseModel):
 
     @staticmethod
     def try_from(value: Option[JsonRpcError | Any]) -> Option[JsonRpcError]:
+        """Attempt to convert an :class:`~pyfplib.option.Option` into an error.
+
+        Args:
+            value: An ``Option`` that may contain a value to convert.
+
+        Returns:
+            ``Some(JsonRpcError)`` if *value* was ``Some``, otherwise ``Nothing``.
+        """
         return value.map(lambda err: JsonRpcError.from_error(err))
 
 
 class JsonRpcRequest(BaseModel):
-    """A JSON-RPC 2.0 request: ``{"jsonrpc": "2.0", "method": ..., "params": ..., "id": ...}``."""
+    """A JSON-RPC 2.0 request object.
+
+    A request contains a ``method`` name, an optional ``params`` payload, and
+    an ``id`` that the client uses to correlate the response.
+
+    Attributes:
+        method: The name of the remote procedure to invoke.
+        id: A unique identifier for this request (auto-generated UUID by default).
+        params: Optional positional or named arguments for the method.
+        jsonrpc: The protocol version, defaults to ``"2.0"``.
+    """
 
     method: str
     id: JsonRpcId = str(uuid4())
@@ -107,23 +216,62 @@ class JsonRpcRequest(BaseModel):
 
     @classmethod
     def try_from_dict(cls, data: dict[str, Any]) -> Result[JsonRpcRequest, Exception]:
+        """Attempt to build a request from a plain dictionary.
+
+        Args:
+            data: A dictionary with JSON-RPC request fields.
+
+        Returns:
+            ``Ok(request)`` on success, or ``Err(exception)`` on validation failure.
+        """
         return Result.try_call(cls.model_validate, data)
 
     @classmethod
     def try_from_json(cls, data: str) -> Result[JsonRpcRequest, Exception]:
+        """Attempt to build a request from a JSON string.
+
+        Args:
+            data: A JSON-encoded string representing a request.
+
+        Returns:
+            ``Ok(request)`` on success, or ``Err(exception)`` on parse/validation failure.
+        """
         return Result.try_call(cls.model_validate_json, data)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict, omitting the optional ``params`` when absent."""
+        """Serialize the request to a plain dictionary.
+
+        The ``params`` key is omitted when ``None``.
+
+        Returns:
+            A dictionary suitable for JSON serialisation.
+        """
         data = self.model_dump()
         if self.params is None:
             data.pop("params", None)
         return data
 
     def to_json(self) -> str:
+        """Serialize the request to a JSON string.
+
+        Returns:
+            A compact JSON representation of this request.
+        """
         return json.dumps(self.to_dict())
 
     def into(self, result: Result[Any, JsonRpcError]) -> JsonRpcResponse:
+        """Create a :class:`JsonRpcResponse` from a handler result.
+
+        This is a convenience method for dispatching the result of a method
+        handler back as a response.  It accepts a :class:`~pyfplib.result.Result`,
+        a :class:`JsonRpcError`, or a raw value.
+
+        Args:
+            result: The outcome of processing this request.
+
+        Returns:
+            A response carrying either the unwrapped result or the error.
+        """
         if isinstance(result, Result):
             return JsonRpcResponse.from_result(self.id, result)
         elif isinstance(result, JsonRpcError):
@@ -133,7 +281,16 @@ class JsonRpcRequest(BaseModel):
 
 
 class JsonRpcNotification(BaseModel):
-    """A JSON-RPC 2.0 notification: a request without an ``id`` (no response expected)."""
+    """A JSON-RPC 2.0 notification object.
+
+    A notification is identical to a request but omits the ``id`` field,
+    indicating that no response is expected from the server.
+
+    Attributes:
+        method: The name of the event or procedure being announced.
+        params: Optional positional or named arguments.
+        jsonrpc: The protocol version, defaults to ``"2.0"``.
+    """
 
     method: str
     params: JsonRpcParams = None
@@ -157,25 +314,62 @@ class JsonRpcNotification(BaseModel):
     def try_from_dict(
         cls, data: dict[str, Any]
     ) -> Result[JsonRpcNotification, Exception]:
+        """Attempt to build a notification from a plain dictionary.
+
+        Args:
+            data: A dictionary with JSON-RPC notification fields.
+
+        Returns:
+            ``Ok(notification)`` on success, or ``Err(exception)`` on validation failure.
+        """
         return Result.try_call(cls.model_validate, data)
 
     @classmethod
     def try_from_json(cls, data: str) -> Result[JsonRpcNotification, Exception]:
+        """Attempt to build a notification from a JSON string.
+
+        Args:
+            data: A JSON-encoded string representing a notification.
+
+        Returns:
+            ``Ok(notification)`` on success, or ``Err(exception)`` on parse/validation failure.
+        """
         return Result.try_call(cls.model_validate_json, data)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict, omitting the optional ``params`` when absent."""
+        """Serialize the notification to a plain dictionary.
+
+        The ``params`` key is omitted when ``None``.
+
+        Returns:
+            A dictionary suitable for JSON serialisation.
+        """
         data = self.model_dump()
         if self.params is None:
             data.pop("params", None)
         return data
 
     def to_json(self) -> str:
+        """Serialize the notification to a JSON string.
+
+        Returns:
+            A compact JSON representation of this notification.
+        """
         return json.dumps(self.to_dict())
 
 
 class JsonRpcResponse(BaseModel):
-    """A JSON-RPC 2.0 response: carries exactly one of ``result`` or ``error`` plus an ``id``."""
+    """A JSON-RPC 2.0 response object.
+
+    Exactly one of ``result`` or ``error`` must be set.  The ``id`` matches
+    the ``id`` of the originating request.
+
+    Attributes:
+        id: The identifier of the request this response corresponds to.
+        result: The return value when the method executed successfully.
+        error: A :class:`JsonRpcError` when the method failed.
+        jsonrpc: The protocol version, defaults to ``"2.0"``.
+    """
 
     id: JsonRpcId
     result: Any = None
@@ -185,13 +379,6 @@ class JsonRpcResponse(BaseModel):
     @field_validator("error")
     @classmethod
     def _validate_error(cls, error: JsonRpcError) -> JsonRpcError:
-        if not isinstance(error, JsonRpcError):
-            if "code" not in error or "message" not in error:
-                raise ValueError("error must contain 'code' and 'message'")
-            if not isinstance(error.code, int) or not isinstance(error.message, str):
-                raise TypeError(
-                    "error 'code' must be an int and 'message' must be a str"
-                )
         return error
 
     @model_validator(mode="after")
@@ -206,6 +393,18 @@ class JsonRpcResponse(BaseModel):
     def from_result(
         id: JsonRpcId, result: Result[Any, JsonRpcError]
     ) -> JsonRpcResponse:
+        """Build a response from a :class:`~pyfplib.result.Result`.
+
+        If *result* is ``Ok`` the unwrapped value becomes ``result``; if it
+        is ``Err`` the unwrapped error becomes ``error``.
+
+        Args:
+            id: The request identifier to echo back.
+            result: The handler's outcome.
+
+        Returns:
+            A fully constructed :class:`JsonRpcResponse`.
+        """
         return (
             JsonRpcResponse(id=id, result=result.unwrap())
             if result.is_ok()
@@ -214,21 +413,64 @@ class JsonRpcResponse(BaseModel):
 
     @staticmethod
     def from_jrpc_error(id: JsonRpcId, error: JsonRpcError) -> JsonRpcResponse:
+        """Build an error response.
+
+        Args:
+            id: The request identifier to echo back.
+            error: The error to include.
+
+        Returns:
+            A :class:`JsonRpcResponse` with only ``error`` set.
+        """
         return JsonRpcResponse(id=id, error=error)
 
     @staticmethod
     def from_jrpc_result(id: JsonRpcId, result: Any) -> JsonRpcResponse:
+        """Build a successful response.
+
+        Args:
+            id: The request identifier to echo back.
+            result: The return value of the method.
+
+        Returns:
+            A :class:`JsonRpcResponse` with only ``result`` set.
+        """
         return JsonRpcResponse(id=id, result=result)
 
     @staticmethod
     def try_from_dict(data: dict[str, Any]) -> Result[JsonRpcResponse, Exception]:
+        """Attempt to build a response from a plain dictionary.
+
+        Args:
+            data: A dictionary with JSON-RPC response fields.
+
+        Returns:
+            ``Ok(response)`` on success, or ``Err(exception)`` on validation failure.
+        """
         return Result.try_call(JsonRpcResponse.model_validate, data)
 
     @staticmethod
     def try_from_json(data: str) -> Result[JsonRpcResponse, Exception]:
+        """Attempt to build a response from a JSON string.
+
+        Args:
+            data: A JSON-encoded string representing a response.
+
+        Returns:
+            ``Ok(response)`` on success, or ``Err(exception)`` on parse/validation failure.
+        """
         return Result.try_call(JsonRpcResponse.model_validate_json, data)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the response to a plain dictionary.
+
+        When an ``error`` is present the ``result`` key is removed and the
+        error code is coerced to ``int``.  When ``result`` is present the
+        ``error`` key is removed.
+
+        Returns:
+            A dictionary suitable for JSON serialisation.
+        """
         data = self.model_dump()
         if self.error is not None:
             data.pop("result", None)
@@ -240,10 +482,35 @@ class JsonRpcResponse(BaseModel):
         return data
 
     def to_json(self) -> str:
+        """Serialize the response to a JSON string.
+
+        Returns:
+            A compact JSON representation of this response.
+        """
         return json.dumps(self.to_dict())
 
 
 def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]:
+    """Attempt to parse a JSON string as a JSON-RPC message.
+
+    The function first tries to parse as a :class:`JsonRpcRequest`; if that
+    fails it falls back to :class:`JsonRpcNotification`.  If both fail, the
+    parse error from the request attempt is returned.
+
+    .. note::
+
+       Because :class:`JsonRpcRequest` defaults ``id`` via ``uuid4()``,
+       a notification payload (no ``id``) will succeed as a request.  Use
+       :meth:`JsonRpcNotification.try_from_json` directly when you need to
+       enforce the notification form.
+
+    Args:
+        data: A JSON-encoded string.
+
+    Returns:
+        ``Ok(request | notification)`` on success, or ``Err(JsonRpcError)``
+        containing the parse failure.
+    """
     return (
         Result.try_call(JsonRpcRequest.try_from_json, data)
         .map_err(lambda _: Result.try_call(JsonRpcNotification.try_from_json, data))

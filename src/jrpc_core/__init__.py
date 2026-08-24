@@ -7,15 +7,18 @@ from jrpc_core.messages import (
     JsonRpcResponse,
     JsonRpcError,
     JsonRpcVersion,
+    try_parse,
 )
 
 from jrpc_core.dispatcher import (
     JsonRpcDispatcher,
     JsonRpcMethodWrapper,
     JsonRpcHandlerCollection,
+    JsonRpcResponseCtorWrapper,
 )
 
 __all__ = [
+    try_parse.__name__,
     JsonRpcRequest.__name__,
     JsonRpcResponse.__name__,
     JsonRpcNotification.__name__,
@@ -24,4 +27,5 @@ __all__ = [
     JsonRpcDispatcher.__name__,
     JsonRpcMethodWrapper.__name__,
     JsonRpcHandlerCollection.__name__,
+    JsonRpcResponseCtorWrapper.__name__,
 ]

@@ -14,6 +14,7 @@ from jrpc_core.dispatcher import (
     JsonRpcDispatcher,
     JsonRpcHandlerCollection,
     JsonRpcMethodWrapper,
+    JsonRpcResponseCtorWrapper,
 )
 from jrpc_core.messages import (
     JsonRpcError,
@@ -30,15 +31,21 @@ from jrpc_core.messages import (
 
 
 class TestJsonRpcMethodWrapper:
-    def test_init_without_validators(self):
+    def test_init_without_validator_and_converter(self):
         w = JsonRpcMethodWrapper(name="m", method=lambda x: x)
         assert w.name == "m"
-        assert w._validators == []
+        assert w._validator is None
+        assert w._converter is None
 
-    def test_init_with_validators(self):
+    def test_init_with_validator(self):
         v = lambda args: True
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[v])
-        assert w._validators == [v]
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=v)
+        assert w._validator is v
+
+    def test_init_with_converter(self):
+        c = lambda args: args
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, converter=c)
+        assert w._converter is c
 
     def test_name_property(self):
         w = JsonRpcMethodWrapper(name="hello", method=lambda: None)
@@ -87,7 +94,7 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return Some(JsonRpcError(code=JsonRpcErrorCode.InvalidParams, message="nope"))
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
         result = w(Some([1, 2]))
         assert result.is_err()
         assert result.unwrap_err().message == "nope"
@@ -96,7 +103,7 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return False
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
         result = w(Some([1, 2]))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.InvalidParams
@@ -105,7 +112,7 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return RuntimeError("bad params")
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
         result = w(Some([1, 2]))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.InternalError
@@ -114,7 +121,7 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return JsonRpcErrorCode.MethodNotFound.into()
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
         result = w(Some([1, 2]))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.MethodNotFound
@@ -123,10 +130,92 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return True
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: sum(x), validators=[validator])
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: sum(x), validator=validator)
         result = w(Some([1, 2, 3]))
         assert result.is_ok()
         assert result.unwrap() == 6
+
+    def test_call_no_converter_passthrough(self):
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x[0] + x[1])
+        result = w(Some([1, 2]))
+        assert result.is_ok()
+        assert result.unwrap() == 3
+
+    def test_call_converter_raw_value(self):
+        w = JsonRpcMethodWrapper(
+            name="m",
+            method=lambda name: f"hello {name}",
+            converter=lambda p: p["name"],
+        )
+        result = w(Some({"name": "Ada"}))
+        assert result.is_ok()
+        assert result.unwrap() == "hello Ada"
+
+    def test_call_converter_option_some(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x * 2, converter=lambda p: Some(p)
+        )
+        result = w(Some(21))
+        assert result.is_ok()
+        assert result.unwrap() == 42
+
+    def test_call_converter_option_nothing_rejected(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x, converter=lambda p: Nothing()
+        )
+        result = w(Some([1]))
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.code is JsonRpcErrorCode.ConversionError
+
+    def test_call_converter_result_ok(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x + 1, converter=lambda p: Ok(p)
+        )
+        result = w(Some(41))
+        assert result.is_ok()
+        assert result.unwrap() == 42
+
+    def test_call_converter_result_err_rejected(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x, converter=lambda p: Err("bad shape")
+        )
+        result = w(Some([1]))
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.code is JsonRpcErrorCode.ConversionError
+        assert err.data == "bad shape"
+
+    def test_call_converter_raises_rejected(self):
+        def bad_converter(params):
+            raise ValueError("nope")
+
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, converter=bad_converter)
+        result = w(Some([1]))
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.code is JsonRpcErrorCode.ConversionError
+        assert isinstance(err.data, ValueError)
+
+    def test_validation_runs_before_conversion(self):
+        calls = []
+
+        def validator(args):
+            calls.append("validate")
+            return True
+
+        def converter(args):
+            calls.append("convert")
+            return args
+
+        def method(args):
+            calls.append("call")
+
+        w = JsonRpcMethodWrapper(
+            name="m", method=method, validator=validator, converter=converter
+        )
+        w(Some([1]))
+        assert calls == ["validate", "convert", "call"]
 
     def test_call_with_args_method_success(self):
         w = JsonRpcMethodWrapper(name="m", method=lambda x: x[0] + x[1])
@@ -230,6 +319,97 @@ class TestJsonRpcHandlerCollection:
     def test_remove_unexpected_type(self):
         c = JsonRpcHandlerCollection()
         assert c.remove(42) is False
+
+
+# ---------------------------------------------------------------------------
+# JsonRpcResponseCtorWrapper
+# ---------------------------------------------------------------------------
+
+
+class TestJsonRpcResponseCtorWrapperState:
+    def test_is_result(self):
+        state = JsonRpcResponseCtorWrapper.State.Result
+        assert state.is_result() is True
+        assert state.is_error() is False
+
+    def test_is_error(self):
+        state = JsonRpcResponseCtorWrapper.State.Error
+        assert state.is_error() is True
+        assert state.is_result() is False
+
+    def test_int_conversion(self):
+        assert int(JsonRpcResponseCtorWrapper.State.Result) == 1
+        assert int(JsonRpcResponseCtorWrapper.State.Error) == 2
+
+
+class TestJsonRpcResponseCtorWrapperWhen:
+    W = JsonRpcResponseCtorWrapper
+    S = JsonRpcResponseCtorWrapper.State
+
+    def test_for_result_matches_only_result(self):
+        when = self.W._When.for_result()
+        assert when == self.S.Result
+        assert not when == self.S.Error
+
+    def test_for_error_matches_only_error(self):
+        when = self.W._When.for_error()
+        assert when == self.S.Error
+        assert not when == self.S.Result
+
+    def test_for_both_cases_matches_both(self):
+        when = self.W._When.for_both_cases()
+        assert when == self.S.Result
+        assert when == self.S.Error
+
+    def test_eq_same_code(self):
+        assert self.W._When.for_result() == self.W._When.for_result()
+        assert self.W._When.for_result() != self.W._When.for_error()
+
+    def test_hash_equal_for_same_code(self):
+        assert hash(self.W._When.for_result()) == hash(self.W._When.for_result())
+
+    def test_str(self):
+        assert str(self.W._When.for_result()) == "for result"
+        assert str(self.W._When.for_error()) == "for error"
+        assert str(self.W._When.for_both_cases()) == "for both cases"
+
+    def test_repr_equals_str(self):
+        when = self.W._When.for_both_cases()
+        assert repr(when) == str(when)
+
+    def test_int_returns_bitmask(self):
+        assert int(self.W._When.for_result()) == 1
+        assert int(self.W._When.for_error()) == 2
+        assert int(self.W._When.for_both_cases()) == 3
+
+
+class TestJsonRpcResponseCtorWrapper:
+    def test_default_when_is_both_cases(self):
+        w = JsonRpcResponseCtorWrapper("m", JsonRpcResponse)
+        assert w.when == JsonRpcResponseCtorWrapper.State.Result
+        assert w.when == JsonRpcResponseCtorWrapper.State.Error
+
+    def test_explicit_states_restrict_when(self):
+        w = JsonRpcResponseCtorWrapper(
+            "m", JsonRpcResponse, JsonRpcResponseCtorWrapper.State.Error
+        )
+        assert w.when == JsonRpcResponseCtorWrapper.State.Error
+        assert not w.when == JsonRpcResponseCtorWrapper.State.Result
+
+    def test_method_property(self):
+        w = JsonRpcResponseCtorWrapper("m", JsonRpcResponse)
+        assert w.method == "m"
+
+    def test_call_delegates_to_ctor(self):
+        captured = {}
+
+        def ctor(**kwargs):
+            captured.update(kwargs)
+            return "built"
+
+        w = JsonRpcResponseCtorWrapper("m", ctor)
+        assert w(id=1, result="x") == "built"
+        assert captured == {"id": 1, "result": "x"}
 
 
 # ---------------------------------------------------------------------------
@@ -361,3 +541,112 @@ class TestJsonRpcDispatcher:
         resp = result.unwrap()
         assert resp.is_ok()
         assert resp.unwrap().result is None
+
+    def test_emplace_request_handler_registers(self):
+        d = JsonRpcDispatcher()
+        assert d.emplace_request_handler(name="add", method=lambda a, b: a + b) is True
+        assert d.request_handler_registry.exists("add") is True
+        assert d.emplace_request_handler(name="add", method=lambda x: x) is False
+
+    def test_emplace_request_handler_with_validator_and_converter(self):
+        d = JsonRpcDispatcher()
+        d.emplace_request_handler(
+            name="greet",
+            method=lambda name: f"hi {name}",
+            validator=lambda p: isinstance(p, dict),
+            converter=lambda p: p["name"],
+        )
+        req = JsonRpcRequest(method="greet", params={"name": "Ada"}, id=1)
+        resp = d(req).unwrap().unwrap()
+        assert resp.result == "hi Ada"
+
+    def test_emplace_notification_handler_registers(self):
+        d = JsonRpcDispatcher()
+        assert (
+            d.emplace_notification_handler(name="evt", method=lambda args: None) is True
+        )
+        assert d.notification_handler_registry.exists("evt") is True
+        assert d.emplace_notification_handler(name="evt", method=lambda args: None) is False
+
+    def test_custom_response_ctor_used_on_success(self):
+        captured = {}
+
+        def ctor(**kwargs):
+            captured.update(kwargs)
+            return JsonRpcResponse(id=kwargs["id"], result="custom")
+
+        d = JsonRpcDispatcher()
+        d.emplace_custom_response_ctor("add", ctor)
+        d.emplace_request_handler(name="add", method=lambda args: args[0] + args[1])
+        resp = d(JsonRpcRequest(method="add", params=[1, 2], id=9)).unwrap().unwrap()
+        assert resp.result == "custom"
+        assert captured["id"] == 9
+        assert captured["result"] == 3
+
+    def test_add_custom_response_ctor_used_on_success(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], result="wrapped")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(JsonRpcResponseCtorWrapper("m", ctor))
+        d.emplace_request_handler(name="m", method=lambda args: 42)
+        resp = d(JsonRpcRequest(method="m", params=[1], id=8)).unwrap().unwrap()
+        assert resp.result == "wrapped"
+
+    def test_error_case_ctor_used_on_error(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], error=kwargs["error"])
+
+        def boom(args):
+            raise RuntimeError("boom")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(
+            JsonRpcResponseCtorWrapper("fail", ctor, JsonRpcDispatcher.ERROR_CASE)
+        )
+        d.emplace_request_handler(name="fail", method=boom)
+        resp = d(JsonRpcRequest(method="fail", params=[1], id=5)).unwrap().unwrap()
+        assert resp.error is not None
+        assert resp.error.code is JsonRpcErrorCode.ExecutionError
+        assert isinstance(resp.error.data, RuntimeError)
+
+    def test_result_case_ctor_ignored_on_error(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], result="should not happen")
+
+        def boom(args):
+            raise RuntimeError("boom")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(
+            JsonRpcResponseCtorWrapper("m", ctor, JsonRpcDispatcher.RESULT_CASE)
+        )
+        d.emplace_request_handler(name="m", method=boom)
+        resp = d(JsonRpcRequest(method="m", params=[1], id=6)).unwrap().unwrap()
+        assert resp.error is not None
+        assert resp.error.code is JsonRpcErrorCode.ExecutionError
+
+    def test_error_case_ctor_ignored_on_success(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], result="should not happen")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(
+            JsonRpcResponseCtorWrapper("m", ctor, JsonRpcDispatcher.ERROR_CASE)
+        )
+        d.emplace_request_handler(name="m", method=lambda args: 42)
+        resp = d(JsonRpcRequest(method="m", params=[1], id=7)).unwrap().unwrap()
+        assert resp.result == 42
+
+    def test_add_custom_response_ctor_replaces_existing(self):
+        first = JsonRpcResponseCtorWrapper(
+            "m", lambda **kw: JsonRpcResponse(id=kw["id"])
+        )
+        second = JsonRpcResponseCtorWrapper(
+            "m", lambda **kw: JsonRpcResponse(id=kw["id"])
+        )
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(first)
+        d.add_custom_response_ctor(second)
+        when, ctor = d._registry["m"]
+        assert ctor is second

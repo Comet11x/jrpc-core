@@ -34,6 +34,7 @@ class TestJsonRpcErrorCode:
         assert JsonRpcErrorCode.MethodNotFound.value == -32601
         assert JsonRpcErrorCode.InvalidRequest.value == -32600
         assert JsonRpcErrorCode.ExecutionError.value == -32000
+        assert JsonRpcErrorCode.ConversionError.value == -32001
 
     def test_int_conversion(self):
         assert int(JsonRpcErrorCode.ParseError) == -32700
@@ -45,6 +46,7 @@ class TestJsonRpcErrorCode:
         assert JsonRpcErrorCode.MethodNotFound.description() == "Method not found"
         assert JsonRpcErrorCode.InvalidRequest.description() == "Invalid Request"
         assert JsonRpcErrorCode.ExecutionError.description() == "Execution error"
+        assert JsonRpcErrorCode.ConversionError.description() == "Data conversion error"
 
     def test_default(self):
         assert JsonRpcErrorCode.default() is JsonRpcErrorCode.InternalError
@@ -326,6 +328,10 @@ class TestJsonRpcResponse:
         parsed = json.loads(raw)
         assert parsed["id"] == "x"
         assert parsed["result"] == {"key": "val"}
+
+    def test_serialize_matches_to_json(self):
+        resp = JsonRpcResponse(id=1, result="ok")
+        assert resp.serialize() == resp.to_json()
 
     def test_validate_error_raw_dict_coerced(self):
         resp = JsonRpcResponse(id=1, error={"code": -32600, "message": "bad req"})

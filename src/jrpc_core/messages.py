@@ -9,9 +9,20 @@ validating, and serialising JSON-RPC 2.0 messages as defined in
 
 Typical usage::
 
-    from jrpc_core.messages import JsonRpcRequest, JsonRpcResponse
+    # Server code
+    from jrpc_core import try_parse, JsonRpcRequest, JsonRpcResponse
+
+    def handle_server_data(data: str):
+        res = try_parse(data)
+
+
+
 
     request = JsonRpcRequest(method="add", params=[1, 2])
+    data: str = request.to_json()
+    // or
+    // data: str = request.serialize()
+    JsonRpc
     response = request.into(Result.ok(3))
     print(response.to_json())
 """
@@ -23,8 +34,8 @@ from enum import Enum, StrEnum
 from typing import Any, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, field_validator, model_validator
-from pyfplib import Nothing, Option, Result, Some
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pyfplib import Option, Result
 
 JsonRpcId = str | int | float | None
 """Type alias for a JSON-RPC message identifier.
@@ -66,6 +77,9 @@ class JsonRpcErrorCode(Enum):
     ExecutionError = -32000
     """A server-defined execution error occurred."""
 
+    ConversionError = -32001
+    """A server-defined conversion error occurred."""
+
     def __int__(self) -> int:
         """Return the integer value of this error code."""
         return self.value
@@ -86,9 +100,11 @@ class JsonRpcErrorCode(Enum):
             return "Method not found"
         elif self == JsonRpcErrorCode.InvalidRequest:
             return "Invalid Request"
-        else:
-            # elif self == JsonRpcErrorCode.ExecutionError:
+        elif self == JsonRpcErrorCode.ExecutionError:
             return "Execution error"
+        else:
+            # ConversionError is the only remaining member.
+            return "Data conversion error"
 
     @staticmethod
     def default() -> JsonRpcErrorCode:
@@ -161,9 +177,10 @@ class JsonRpcError(BaseModel):
         if isinstance(error, JsonRpcError):
             return error
         else:
-            maybe_code: Option[int] = Result.try_call(
-                getattr, cast(Any, error), "code"
-            ).ok()
+            maybe_code: Option[int | JsonRpcErrorCode] = cast(
+                Option[int | JsonRpcErrorCode],
+                Result.try_call(getattr, cast(Any, error), "code").ok(),
+            )
             code = (
                 int(maybe_code.unwrap())
                 if maybe_code.is_some()
@@ -203,7 +220,7 @@ class JsonRpcRequest(BaseModel):
     """
 
     method: str
-    id: JsonRpcId = str(uuid4())
+    id: JsonRpcId = Field(default_factory=lambda: str(uuid4()))
     params: JsonRpcParams = None
     jsonrpc: JsonRpcVersion = JsonRpcVersion.Version2
 
@@ -258,6 +275,16 @@ class JsonRpcRequest(BaseModel):
             A compact JSON representation of this request.
         """
         return json.dumps(self.to_dict())
+
+    def serialize(self) -> str:
+        """Serialize the request to a JSON string.
+
+        Alias for :meth:`to_json`.
+
+        Returns:
+            A compact JSON representation of this request.
+        """
+        return self.to_json()
 
     def into(self, result: Result[Any, JsonRpcError]) -> JsonRpcResponse:
         """Create a :class:`JsonRpcResponse` from a handler result.
@@ -356,6 +383,16 @@ class JsonRpcNotification(BaseModel):
             A compact JSON representation of this notification.
         """
         return json.dumps(self.to_dict())
+
+    def serialize(self) -> str:
+        """Serialize the notification to a JSON string.
+
+        Alias for :meth:`to_json`.
+
+        Returns:
+            A compact JSON representation of this notification.
+        """
+        return self.to_json()
 
 
 class JsonRpcResponse(BaseModel):
@@ -459,7 +496,7 @@ class JsonRpcResponse(BaseModel):
         Returns:
             ``Ok(response)`` on success, or ``Err(exception)`` on parse/validation failure.
         """
-        return Result.try_call(JsonRpcResponse.model_validate_json, data)
+        return Result.try_call(JsonRpcResponse.model_validate_json, data, strict=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the response to a plain dictionary.
@@ -489,12 +526,25 @@ class JsonRpcResponse(BaseModel):
         """
         return json.dumps(self.to_dict())
 
+    def serialize(self) -> str:
+        """Serialize the response to a JSON string.
 
-def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]:
+        Alias for :meth:`to_json`.
+
+        Returns:
+            A compact JSON representation of this response.
+        """
+        return self.to_json()
+
+
+def try_parse(
+    data: str,
+) -> Result[JsonRpcNotification | JsonRpcRequest | JsonRpcResponse, JsonRpcError]:
     """Attempt to parse a JSON string as a JSON-RPC message.
 
-    The function first tries to parse as a :class:`JsonRpcRequest`; if that
-    fails it falls back to :class:`JsonRpcNotification`.  If both fail, the
+    The function first tries to parse as a :class:`JsonRpcNotification`; if that
+    fails it falls back to :class:`JsonRpcRequest`; if that
+    fails it falls back to :class:`JsonRpcResponse`.  If all of them fail, the
     parse error from the request attempt is returned.
 
     .. note::
@@ -508,11 +558,15 @@ def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpc
         data: A JSON-encoded string.
 
     Returns:
-        ``Ok(request | notification)`` on success, or ``Err(JsonRpcError)``
+        ``Ok(request | notification | response)`` on success, or ``Err(JsonRpcError)``
         containing the parse failure.
+
+    TODO:
+        CRITICAL MESSAGE: you should use `flatten_all` after release a new version of pyfplib,
     """
     return (
-        Result.try_call(JsonRpcRequest.try_from_json, data)
+        JsonRpcResponse.try_from_json(data)
         .map_err(lambda _: Result.try_call(JsonRpcNotification.try_from_json, data))
+        .map_err(lambda _: Result.try_call(JsonRpcRequest.try_from_json, data))
         .flatten()
     )

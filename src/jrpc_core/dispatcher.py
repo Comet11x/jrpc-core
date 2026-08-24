@@ -18,6 +18,7 @@ Typical usage::
     response = dispatcher(JsonRpcRequest(method="add", params=[1, 2]))
 """
 
+from enum import Enum
 from typing import Any, Callable
 
 from pyfplib import Err, Nothing, Option, Ok, Result, Some
@@ -30,9 +31,24 @@ from jrpc_core.messages import (
     JsonRpcResponse,
 )
 
+ConverterType = Callable[..., Option[Any] | Result[Any, Exception | JsonRpcError] | Any]
+"""Type alias for a converter callable.
+
+A converter receives the raw ``params`` payload and may return an
+``Option``, a ``Result``, or any other value used directly as the
+method argument.
+"""
+
+ValidatorType = Callable[..., Option[JsonRpcError] | bool]
+"""Type alias for a validator callable.
+
+A validator receives the parsed ``params`` payload and reports whether
+they are acceptable (see :meth:`JsonRpcMethodWrapper._validate`).
+"""
+
 
 class JsonRpcMethodWrapper:
-    """Wraps a callable as a JSON-RPC method with optional parameter validators.
+    """Wraps a callable as a JSON-RPC method with optional validation and conversion.
 
     Attributes:
         name: The JSON-RPC method name this wrapper is registered under.
@@ -43,22 +59,30 @@ class JsonRpcMethodWrapper:
         *,
         name: str,
         method: Callable[..., Any],
-        validators: list[Callable[..., Option[JsonRpcError]]] | None = None,
+        validator: ValidatorType | None = None,
+        converter: ConverterType | None = None,
     ):
         """Initialise the wrapper.
 
         Args:
             name: The JSON-RPC method name.
             method: The callable to invoke when this method is dispatched.
-            validators: An optional list of callables that receive the parsed
-                ``params`` and return ``Some(error)`` to reject, ``False`` to
-                reject with a generic error, an :class:`Exception` /
+            validator: An optional callable that receives the parsed
+                ``params`` and returns ``Some(error)`` to reject, ``False``
+                to reject with a generic error, an :class:`Exception` /
                 :class:`JsonRpcError` to reject, or any truthy / ``None``
                 value to accept.
+            converter: An optional callable that transforms the parsed
+                ``params`` before the method is invoked.  It may return an
+                ``Option`` (``Some`` value used as-is, ``Nothing``
+                rejected), a ``Result`` (``Ok`` value used as-is, ``Err``
+                rejected), or any other value used directly.  Failures
+                become :attr:`JsonRpcErrorCode.ConversionError`.
         """
         self._name = name
         self._method = method
-        self._validators = validators or []
+        self._validator: ValidatorType = validator
+        self._converter = converter
 
     @property
     def name(self) -> str:
@@ -74,7 +98,9 @@ class JsonRpcMethodWrapper:
         return isinstance(other, JsonRpcMethodWrapper) and self._name == other._name
 
     @classmethod
-    def _handle_invalid_params_error(cls, error: JsonRpcError | Exception) -> JsonRpcError:
+    def _handle_invalid_params_error(
+        cls, error: JsonRpcError | Exception
+    ) -> JsonRpcError:
         """Convert a validator result into a :class:`JsonRpcError`.
 
         If *error* is already a :class:`JsonRpcError` it is returned as-is;
@@ -91,57 +117,134 @@ class JsonRpcMethodWrapper:
         else:
             return JsonRpcErrorCode.InvalidParams.into(error)
 
-    def __call__(self, args: Option[Any]) -> Result[Any, JsonRpcError]:
+    def _convert(self, params: Any) -> Result[Any, JsonRpcError]:
+        """Run the optional converter over the raw parameters.
+
+        Args:
+            params: The raw ``params`` payload.
+
+        Returns:
+            ``Ok(converted)`` when conversion succeeded (or no converter is
+            set), otherwise ``Err(JsonRpcError)`` with
+            :attr:`JsonRpcErrorCode.ConversionError`.
+        """
+        if isinstance(self._converter, Callable):
+            try:
+                converted_args = self._converter(params)
+                if isinstance(converted_args, Option):
+                    return (
+                        Ok(converted_args.unwrap())
+                        if converted_args.is_some()
+                        else Err(JsonRpcErrorCode.ConversionError.into())
+                    )
+                elif isinstance(converted_args, Result):
+                    if converted_args.is_ok():
+                        return Ok(converted_args.unwrap())
+                    else:
+                        err = JsonRpcErrorCode.ConversionError.into()
+                        err.data = converted_args.unwrap_err()
+                        return Err(err)
+                else:
+                    return Ok(converted_args)
+            except Exception as err:
+                err = JsonRpcErrorCode.ConversionError.into()
+                err.data = converted_args.unwrap_err()
+                return Err(err)
+        else:
+            return Ok(params)
+
+    def _validate(self, params: Any) -> Option[JsonRpcError]:
+        """Run the optional validator over the raw parameters.
+
+        Args:
+            params: The raw ``params`` payload.
+
+        Returns:
+            ``Some(JsonRpcError)`` if the validator rejected the parameters
+            or raised, otherwise ``Nothing``.
+        """
+        if isinstance(self._validator, Callable):
+            try:
+                maybe_error = self._validator(params)
+                if isinstance(maybe_error, Option) and maybe_error.is_some():
+                    return Some(self._handle_invalid_params_error(maybe_error.unwrap()))
+                elif isinstance(maybe_error, bool) and not maybe_error:
+                    return Some(JsonRpcErrorCode.InvalidParams.into())
+                elif isinstance(maybe_error, Exception) or isinstance(
+                    maybe_error, JsonRpcError
+                ):
+                    return Some(JsonRpcError.from_error(maybe_error))
+            except Exception as err:
+                return Some(JsonRpcError.from_error(err))
+        return Nothing()
+
+    def __call__(self, params: Option[Any]) -> Result[Any, JsonRpcError]:
         """Execute the wrapped method with optional parameters.
 
-        Validators are run before the method.  If any validator rejects the
+        Validation runs first, then conversion; if either step rejects the
         parameters the call short-circuits with an ``Err``.
 
         Args:
-            args: An ``Option`` containing the method parameters.  ``Some``
-                means parameters were provided; ``None`` means none.
+            params: An ``Option`` containing the method parameters.  ``Some``
+                means parameters were provided; ``Nothing`` means none.
 
         Returns:
             ``Ok(result)`` on success, or ``Err(JsonRpcError)`` on failure.
         """
-        if args.is_some():
-            args = args.unwrap()
-            for validator in self._validators:
-                maybe_error = validator(args)
-                if isinstance(maybe_error, Option) and maybe_error.is_some():
-                    return Err(self._handle_invalid_params_error(maybe_error.unwrap()))
-                elif isinstance(maybe_error, bool) and not maybe_error:
-                    return Err(JsonRpcErrorCode.InvalidParams.into())
-                elif isinstance(maybe_error, Exception) or isinstance(
-                    maybe_error, JsonRpcError
-                ):
-                    return Err(JsonRpcError.from_error(maybe_error))
+        if params.is_some():
+            params = params.unwrap()
+            maybe_err = self._validate(params)
+            if maybe_err.is_some():
+                return Err(maybe_err.unwrap())
 
-            res = (
-                Result.try_call(self._method, args)
-                .map_err(
-                    lambda err: (
-                        err
-                        if isinstance(err, JsonRpcError)
-                        else JsonRpcErrorCode.ExecutionError.into(err)
-                    )
-                )
-                .flatten()
-            )
+            res = self._convert(params)
+            if res.is_err():
+                return res
+            else:
+                params = res.unwrap()
+
+            return self._call_with_params(params)
         else:
-            res = (
-                Result.try_call(self._method)
-                .map_err(
-                    lambda err: (
-                        err
-                        if isinstance(err, JsonRpcError)
-                        else JsonRpcErrorCode.ExecutionError.into(err)
-                    )
-                )
-                .flatten()
-            )
+            return self._call_without_params()
 
-        return res
+    def _call_without_params(self) -> Result[Any, JsonRpcError]:
+        """Invoke the wrapped method with no arguments.
+
+        Returns:
+            ``Ok(result)`` on success, or ``Err(JsonRpcError)`` on failure.
+        """
+        return (
+            Result.try_call(self._method)
+            .map_err(
+                lambda err: (
+                    err
+                    if isinstance(err, JsonRpcError)
+                    else JsonRpcErrorCode.ExecutionError.into(err)
+                )
+            )
+            .flatten()
+        )
+
+    def _call_with_params(self, params: Any) -> Result[Any, JsonRpcError]:
+        """Invoke the wrapped method with the converted parameters.
+
+        Args:
+            params: The converted parameters passed to the method.
+
+        Returns:
+            ``Ok(result)`` on success, or ``Err(JsonRpcError)`` on failure.
+        """
+        return (
+            Result.try_call(self._method, params)
+            .map_err(
+                lambda err: (
+                    err
+                    if isinstance(err, JsonRpcError)
+                    else JsonRpcErrorCode.ExecutionError.into(err)
+                )
+            )
+            .flatten()
+        )
 
 
 class JsonRpcHandlerCollection:
@@ -226,6 +329,140 @@ class JsonRpcHandlerCollection:
         return ret_value
 
 
+class JsonRpcResponseCtorWrapper:
+    """Binds a custom :class:`JsonRpcResponse` constructor to a method name.
+
+    The wrapper records *when* the constructor applies — successful
+    results, errors, or both — so the dispatcher can pick the right
+    response type per outcome.
+    """
+
+    class State(Enum):
+        """Outcome selector controlling when a constructor is applied."""
+
+        Result = 1
+        """The constructor handles successful results."""
+
+        Error = 2
+        """The constructor handles error responses."""
+
+        def is_error(self) -> bool:
+            """Return whether this state selects error responses."""
+            return self == JsonRpcResponseCtorWrapper.State.Error
+
+        def is_result(self) -> bool:
+            """Return whether this state selects successful results."""
+            return self == JsonRpcResponseCtorWrapper.State.Result
+
+        def __int__(self) -> int:
+            """Return the bitmask code of this state."""
+            return self.value
+
+    class _When:
+        """A bitmask combination of :class:`State` values.
+
+        Use the factory methods :meth:`for_result`, :meth:`for_error`, and
+        :meth:`for_both_cases` instead of instantiating directly.
+        """
+
+        def __init__(self, *states):
+            """Combine *states* into a single bitmask.
+
+            Args:
+                *states: :class:`State` members to combine.
+            """
+            code = 0
+            for state in states:
+                code |= int(state)
+            self._code = code
+
+        def __hash__(self) -> int:
+            """Return a hash based on the underlying bitmask."""
+            return hash(self._code)
+
+        def __eq__(
+            self,
+            other: "JsonRpcResponseCtorWrapper._When | JsonRpcResponseCtorWrapper.State",
+        ) -> bool:
+            """Compare against another ``When``, or test ``State`` membership."""
+            if isinstance(other, JsonRpcResponseCtorWrapper.State):
+                return (self._code & int(other)) != 0
+            else:
+                return self._code == other._code
+
+        def __int__(self) -> int:
+            """Return the underlying bitmask."""
+            return self._code
+
+        def __str__(self) -> str:
+            """Return a human-readable description of the selected outcomes."""
+            if self._code == int(JsonRpcResponseCtorWrapper.State.Result):
+                return "for result"
+            elif self._code == int(JsonRpcResponseCtorWrapper.State.Error):
+                return "for error"
+            else:
+                return "for both cases"
+
+        def __repr__(self) -> str:
+            """Return the same text as :meth:`__str__`."""
+            return str(self)
+
+        @staticmethod
+        def for_result() -> "JsonRpcResponseCtorWrapper._When":
+            """Return a selector matching only successful results."""
+            return JsonRpcResponseCtorWrapper._When(
+                JsonRpcResponseCtorWrapper.State.Result
+            )
+
+        @staticmethod
+        def for_error() -> "JsonRpcResponseCtorWrapper._When":
+            """Return a selector matching only error responses."""
+            return JsonRpcResponseCtorWrapper._When(
+                JsonRpcResponseCtorWrapper.State.Error
+            )
+
+        @staticmethod
+        def for_both_cases() -> "JsonRpcResponseCtorWrapper._When":
+            """Return a selector matching both outcomes."""
+            return JsonRpcResponseCtorWrapper._When(
+                JsonRpcResponseCtorWrapper.State.Result,
+                JsonRpcResponseCtorWrapper.State.Error,
+            )
+
+    def __init__(self, method: str, ctor: Callable[..., JsonRpcResponse], *states):
+        """Bind *ctor* to *method*, restricted to the given outcome states.
+
+        Args:
+            method: The JSON-RPC method name this constructor applies to.
+            ctor: Callable receiving keyword arguments (``id``, ``result``
+                or ``error``, and ``jsonrpc``) and returning a
+                :class:`JsonRpcResponse`.
+            *states: Optional :class:`State` members limiting when *ctor*
+                is used; defaults to both outcomes.
+        """
+        self._method = method
+        self._when = (
+            JsonRpcResponseCtorWrapper._When.for_both_cases()
+            if len(states) == 0
+            else JsonRpcResponseCtorWrapper._When(*states)
+        )
+        self._ctor = ctor
+
+    @property
+    def method(self) -> str:
+        """Return the JSON-RPC method name this constructor is bound to."""
+        return self._method
+
+    @property
+    def when(self) -> _When:
+        """Return the outcome selector for this constructor."""
+        return self._when
+
+    def __call__(self, **kwargs):
+        """Build a response via the wrapped constructor."""
+        return self._ctor(**kwargs)
+
+
 class JsonRpcDispatcher:
     """Routes incoming JSON-RPC messages to registered handlers.
 
@@ -233,10 +470,47 @@ class JsonRpcDispatcher:
     notifications (fire-and-forget).
     """
 
+    # Outcome selectors for custom response constructors registered via
+    # emplace_custom_response_ctor() / add_custom_response_ctor().
+    ERROR_CASE = JsonRpcResponseCtorWrapper.State.Error
+    RESULT_CASE = JsonRpcResponseCtorWrapper.State.Result
+    BOTH_CASES = JsonRpcResponseCtorWrapper._When.for_both_cases()
+
     def __init__(self):
         """Initialise the dispatcher with empty handler registries."""
         self._request_handler_registry = JsonRpcHandlerCollection()
         self._notification_handler_registry = JsonRpcHandlerCollection()
+        self._registry: dict[
+            str, tuple[JsonRpcResponseCtorWrapper._When, JsonRpcResponseCtorWrapper]
+        ] = {}
+
+    def emplace_custom_response_ctor(
+        self, method: str, ctor: Callable[..., JsonRpcResponse], *states
+    ):
+        """Register a custom response constructor for *method*.
+
+        Convenience overload of :meth:`add_custom_response_ctor` taking
+        the constructor parts individually.
+
+        Args:
+            method: The JSON-RPC method name the constructor applies to.
+            ctor: Callable building a :class:`JsonRpcResponse`.
+            *states: Optional :class:`JsonRpcResponseCtorWrapper.State`
+                members restricting when *ctor* is used.
+        """
+        return self.add_custom_response_ctor(
+            JsonRpcResponseCtorWrapper(method, ctor, *states)
+        )
+
+    def add_custom_response_ctor(self, ctor: JsonRpcResponseCtorWrapper):
+        """Register a pre-built custom response constructor.
+
+        Replaces any constructor previously registered for the same method.
+
+        Args:
+            ctor: The wrapper binding a constructor to a method name.
+        """
+        self._registry[ctor.method] = (ctor.when, ctor)
 
     @property
     def request_handler_registry(self) -> JsonRpcHandlerCollection:
@@ -248,8 +522,68 @@ class JsonRpcDispatcher:
         """Return the registry for notification handlers."""
         return self._notification_handler_registry
 
+    def emplace_request_handler(
+        self,
+        *,
+        name: str,
+        method: Callable[..., Any],
+        validator: ValidatorType | None = None,
+        converter: ConverterType | None = None,
+    ) -> bool:
+        """Register a request handler in one call.
+
+        Convenience for
+        ``request_handler_registry.add(JsonRpcMethodWrapper(...))``.
+
+        Args:
+            name: The JSON-RPC method name.
+            method: The callable to invoke when dispatched.
+            validator: Optional parameter validator (see
+                :class:`JsonRpcMethodWrapper`).
+            converter: Optional parameter converter (see
+                :class:`JsonRpcMethodWrapper`).
+
+        Returns:
+            ``True`` if newly registered, ``False`` if the name already exists.
+        """
+        return self._request_handler_registry.add(
+            JsonRpcMethodWrapper(
+                name=name, method=method, validator=validator, converter=converter
+            )
+        )
+
+    def emplace_notification_handler(
+        self,
+        *,
+        name: str,
+        method: Callable[..., Any],
+        validator: ValidatorType | None = None,
+        converter: ConverterType | None = None,
+    ) -> bool:
+        """Register a notification handler in one call.
+
+        Convenience for
+        ``notification_handler_registry.add(JsonRpcMethodWrapper(...))``.
+
+        Args:
+            name: The JSON-RPC method name.
+            method: The callable to invoke when dispatched.
+            validator: Optional parameter validator (see
+                :class:`JsonRpcMethodWrapper`).
+            converter: Optional parameter converter (see
+                :class:`JsonRpcMethodWrapper`).
+
+        Returns:
+            ``True`` if newly registered, ``False`` if the name already exists.
+        """
+        return self._notification_handler_registry.add(
+            JsonRpcMethodWrapper(
+                name=name, method=method, validator=validator, converter=converter
+            )
+        )
+
     def __call__(
-        self, data: str | JsonRpcRequest | JsonRpcNotification
+        self, data: str | JsonRpcRequest | JsonRpcNotification, ctor=JsonRpcResponse
     ) -> Option[Result[JsonRpcResponse, JsonRpcError]]:
         """Dispatch a JSON-RPC message.
 
@@ -310,7 +644,45 @@ class JsonRpcDispatcher:
 
         method = maybe_method.unwrap()
         ret_value = method(self._extract_params(request))
-        return request.into(ret_value)
+        return self._make_jrpc_response(request, ret_value)
+
+    def _make_jrpc_response(
+        self, request: JsonRpcRequest, result: Result[Any, JsonRpcError]
+    ) -> JsonRpcResponse:
+        """Build a response using a custom constructor when one applies.
+
+        Looks up a constructor registered for the request's method and uses
+        it when its outcome selector matches; otherwise falls back to
+        :meth:`JsonRpcRequest.into`.
+
+        Args:
+            request: The incoming request.
+            result: The handler's outcome.
+
+        Returns:
+            A :class:`JsonRpcResponse` carrying the result or the error.
+        """
+        record = self._registry.get(request.method)
+        if record is not None:
+            when, ctor = record
+
+            if result.is_ok() and (
+                when == JsonRpcDispatcher.RESULT_CASE
+                or when == JsonRpcDispatcher.BOTH_CASES
+            ):
+                return ctor(
+                    id=request.id, result=result.unwrap(), jsonrpc=request.jsonrpc
+                )
+            elif result.is_err() and (
+                when == JsonRpcDispatcher.ERROR_CASE
+                or when == JsonRpcDispatcher.BOTH_CASES
+            ):
+                return ctor(
+                    id=request.id,
+                    error=JsonRpcError.from_error(result.unwrap_err()),
+                    jsonrpc=request.jsonrpc,
+                )
+        return request.into(result)
 
     @classmethod
     def _extract_params(

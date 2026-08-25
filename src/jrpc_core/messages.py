@@ -34,7 +34,7 @@ from enum import Enum, StrEnum
 from typing import Any, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from pyfplib import Option, Result
 
 JsonRpcId = str | int | float | None
@@ -50,6 +50,10 @@ JsonRpcParams = dict[str, Any] | list[Any] | None
 Parameters may be a named mapping (``dict``), a positional list (``list``),
 or ``None`` when omitted.
 """
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class JsonRpcErrorCode(Enum):
@@ -137,7 +141,7 @@ class JsonRpcVersion(StrEnum):
     """JSON-RPC 2.0 (default)."""
 
 
-class JsonRpcError(BaseModel):
+class JsonRpcError(_StrictModel):
     """A JSON-RPC 2.0 error object.
 
     Attributes:
@@ -206,7 +210,7 @@ class JsonRpcError(BaseModel):
         return value.map(lambda err: JsonRpcError.from_error(err))
 
 
-class JsonRpcRequest(BaseModel):
+class JsonRpcRequest(_StrictModel):
     """A JSON-RPC 2.0 request object.
 
     A request contains a ``method`` name, an optional ``params`` payload, and
@@ -253,7 +257,7 @@ class JsonRpcRequest(BaseModel):
         Returns:
             ``Ok(request)`` on success, or ``Err(exception)`` on parse/validation failure.
         """
-        return Result.try_call(cls.model_validate_json, data)
+        return Result.try_call(cls.model_validate_json, data, strict=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the request to a plain dictionary.
@@ -307,7 +311,7 @@ class JsonRpcRequest(BaseModel):
             return JsonRpcResponse.from_jrpc_result(self.id, result)
 
 
-class JsonRpcNotification(BaseModel):
+class JsonRpcNotification(_StrictModel):
     """A JSON-RPC 2.0 notification object.
 
     A notification is identical to a request but omits the ``id`` field,
@@ -361,7 +365,7 @@ class JsonRpcNotification(BaseModel):
         Returns:
             ``Ok(notification)`` on success, or ``Err(exception)`` on parse/validation failure.
         """
-        return Result.try_call(cls.model_validate_json, data)
+        return Result.try_call(cls.model_validate_json, data, strict=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the notification to a plain dictionary.
@@ -395,7 +399,7 @@ class JsonRpcNotification(BaseModel):
         return self.to_json()
 
 
-class JsonRpcResponse(BaseModel):
+class JsonRpcResponse(_StrictModel):
     """A JSON-RPC 2.0 response object.
 
     Exactly one of ``result`` or ``error`` must be set.  The ``id`` matches
@@ -539,20 +543,13 @@ class JsonRpcResponse(BaseModel):
 
 def try_parse(
     data: str,
-) -> Result[JsonRpcNotification | JsonRpcRequest | JsonRpcResponse, JsonRpcError]:
+) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]:
     """Attempt to parse a JSON string as a JSON-RPC message.
 
-    The function first tries to parse as a :class:`JsonRpcNotification`; if that
-    fails it falls back to :class:`JsonRpcRequest`; if that
-    fails it falls back to :class:`JsonRpcResponse`.  If all of them fail, the
+    The function first tries to parse as a :class:`JsonRpcResponse`; if that
+    fails it falls back to :class:`JsonRpcNotification`; if that
+    fails it falls back to :class:`JsonRpcRequest`.  If all of them fail, the
     parse error from the request attempt is returned.
-
-    .. note::
-
-       Because :class:`JsonRpcRequest` defaults ``id`` via ``uuid4()``,
-       a notification payload (no ``id``) will succeed as a request.  Use
-       :meth:`JsonRpcNotification.try_from_json` directly when you need to
-       enforce the notification form.
 
     Args:
         data: A JSON-encoded string.
@@ -560,13 +557,11 @@ def try_parse(
     Returns:
         ``Ok(request | notification | response)`` on success, or ``Err(JsonRpcError)``
         containing the parse failure.
-
-    TODO:
-        CRITICAL MESSAGE: you should use `flatten_all` after release a new version of pyfplib,
     """
     return (
         JsonRpcResponse.try_from_json(data)
-        .map_err(lambda _: Result.try_call(JsonRpcNotification.try_from_json, data))
-        .map_err(lambda _: Result.try_call(JsonRpcRequest.try_from_json, data))
+        .map_err(lambda _: JsonRpcNotification.try_from_json(data))
+        .flatten()
+        .map_err(lambda _: JsonRpcRequest.try_from_json(data))
         .flatten()
     )

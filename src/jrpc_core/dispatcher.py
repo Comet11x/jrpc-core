@@ -29,6 +29,7 @@ from jrpc_core.messages import (
     JsonRpcNotification,
     JsonRpcRequest,
     JsonRpcResponse,
+    try_parse,
 )
 
 ConverterType = Callable[..., Option[Any] | Result[Any, Exception | JsonRpcError] | Any]
@@ -476,13 +477,18 @@ class JsonRpcDispatcher:
     RESULT_CASE = JsonRpcResponseCtorWrapper.State.Result
     BOTH_CASES = JsonRpcResponseCtorWrapper._When.for_both_cases()
 
-    def __init__(self):
+    def __init__(
+        self, response_handler: Callable[[JsonRpcResponse], None] | None = None
+    ):
         """Initialise the dispatcher with empty handler registries."""
         self._request_handler_registry = JsonRpcHandlerCollection()
         self._notification_handler_registry = JsonRpcHandlerCollection()
         self._registry: dict[
             str, tuple[JsonRpcResponseCtorWrapper._When, JsonRpcResponseCtorWrapper]
         ] = {}
+        self._response_handler = (
+            response_handler if isinstance(response_handler, Callable) else None
+        )
 
     def emplace_custom_response_ctor(
         self, method: str, ctor: Callable[..., JsonRpcResponse], *states
@@ -583,13 +589,20 @@ class JsonRpcDispatcher:
         )
 
     def __call__(
-        self, data: str | JsonRpcRequest | JsonRpcNotification, ctor=JsonRpcResponse
+        self,
+        data: str
+        | JsonRpcRequest
+        | JsonRpcNotification
+        | JsonRpcResponse
+        | Result[JsonRpcRequest | JsonRpcNotification | JsonRpcResponse, JsonRpcError],
+        ctor=JsonRpcResponse,
     ) -> Option[Result[JsonRpcResponse, JsonRpcError]]:
         """Dispatch a JSON-RPC message.
 
         Args:
             data: A JSON string, :class:`JsonRpcRequest`, or
-                :class:`JsonRpcNotification`.
+                :class:`JsonRpcNotification`, or :class:`JsonRpcResponse`, or
+                :class:`Result[JsonRpcRequest | JsonRpcNotification | JsonRpcResponse, JsonRpcError]`.
 
         Returns:
             ``Some(Ok(response))`` or ``Some(Err(error))`` for requests,
@@ -607,6 +620,11 @@ class JsonRpcDispatcher:
             return self._handle_notification(data).map(lambda err: Err(err))
         elif isinstance(data, JsonRpcRequest):
             return Some(Ok(self._handle_request(data)))
+        elif isinstance(data, JsonRpcResponse) and self._response_handler is not None:
+            self._response_handler(data)
+            return Nothing()
+        elif isinstance(data, Result):
+            return self(data.unwrap())
         else:
             return Some(Err(JsonRpcErrorCode.InternalError.into()))
 
@@ -702,21 +720,19 @@ class JsonRpcDispatcher:
     @classmethod
     def try_parse(
         cls, data: str
-    ) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]:
-        """Attempt to parse a JSON string into a request or notification.
+    ) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]:
+        """Attempt to parse a JSON string as a JSON-RPC message.
 
-        First tries :class:`JsonRpcRequest`; on failure falls back to
-        :class:`JsonRpcNotification`.
+        The function first tries to parse as a :class:`JsonRpcResponse`; if that
+        fails it falls back to :class:`JsonRpcNotification`; if that
+        fails it falls back to :class:`JsonRpcRequest`.  If all of them fail, the
+        parse error from the request attempt is returned.
 
         Args:
             data: A JSON-encoded string.
 
         Returns:
-            ``Ok(request | notification)`` on success, or ``Err(JsonRpcError)``
-            on parse failure.
+            ``Ok(request | notification | response)`` on success, or ``Err(JsonRpcError)``
+            containing the parse failure.
         """
-        return (
-            Result.try_call(JsonRpcRequest.try_from_json, data)
-            .map_err(lambda _: Result.try_call(JsonRpcNotification.try_from_json, data))
-            .flatten()
-        )
+        return try_parse(data)

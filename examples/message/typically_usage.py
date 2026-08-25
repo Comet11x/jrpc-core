@@ -15,9 +15,6 @@ def handle_incoming_message(data: str):
     res = try_parse(data)
     if res.is_ok():
         jrpc_message = res.unwrap()
-        print(">>> ", data)
-        print(">>> ", jrpc_message)
-        print("----------")
         if isinstance(jrpc_message, JsonRpcRequest):
             handle_request(jrpc_message)
         elif isinstance(jrpc_message, JsonRpcNotification):
@@ -50,11 +47,11 @@ def handle_notification(ntf: JsonRpcNotification):
     if ntf.method == "sum":
         result = Result.try_call(sum, cast(list[int], ntf.params))
         if result.is_ok():
-            print(f"OK: {result.unwrap()}")
+            print(f"NOTIFICATION HANDLER OK: {result.unwrap()}")
         else:
-            print(f"ERR: {result.unwrap_err()}")
+            print(f"NOTIFICATION HANDLER ERR: {result.unwrap_err()}")
     else:
-        print(f"ERR: method `{ntf.method}` not found")
+        print(f"NOTIFICATION HANDLER ERR: method `{ntf.method}` not found")
 
 
 def handle_response(res: JsonRpcResponse):
@@ -71,14 +68,26 @@ def send_request():
     handle_incoming_message(message.serialize())
 
 
+def send_bad_request():
+    message = JsonRpcRequest(method="concat", params=["1", "2", "3"])
+    handle_incoming_message(message.serialize())
+
+
 def send_notification():
     message = JsonRpcNotification(method="sum", params=[11, 12, 13])
+    handle_incoming_message(message.serialize())
+
+
+def send_bad_notification():
+    message = JsonRpcNotification(method="concat", params=["1", "2", "3"])
     handle_incoming_message(message.serialize())
 
 
 def main():
     send_request()
     send_notification()
+    send_bad_request()
+    send_bad_notification()
 
 
 if __name__ == "__main__":

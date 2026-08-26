@@ -199,7 +199,7 @@ class JsonRpcError(_StrictModel):
             )
             maybe_data: Option[str] = Result.try_call(getattr, cast(error, Any), "data")
             if maybe_code.is_some() and maybe_message.is_some():
-                code = maybe_code.unwrap()
+                code = int(maybe_code.unwrap())
                 message = maybe_message.unwrap()
                 data = maybe_data.unwrap_or(None)
                 return JsonRpcError(code=code, message=message, data=data)

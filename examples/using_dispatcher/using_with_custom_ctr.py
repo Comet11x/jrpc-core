@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from jrpc_core import (
@@ -54,8 +55,12 @@ class UserRegistry:
     def __init__(self):
         self._reg: dict[str, User] = {}
 
-    def try_get(self, name: str) -> Option[User]:
-        return Option.from_optional(self._reg.get(name))
+    def try_get(self, name: str) -> Result[User, ApplicationError]:
+        user = self._reg.get(name)
+        if user is not None:
+            return Ok(user)
+        else:
+            return Err(UserNotFound(name))
 
     def try_add(self, user: User) -> Option[ApplicationError]:
         if self._reg.get(user.name) is None:
@@ -63,7 +68,6 @@ class UserRegistry:
             return Nothing()
         else:
             raise UserAlreadyExists(user.name)
-            return Some(UserAlreadyExists(user.name))
 
     def try_remove(self, name: str) -> Result[User, ApplicationError]:
         if self._reg.get(name) is not None:
@@ -131,7 +135,7 @@ def ctor_for_err(**kwargs) -> JsonRpcResponse:
     return JsonRpcResponse(id=kwargs["id"], error=err)
 
 
-def main():
+async def async_main():
     reg = UserRegistry()
     dispatcher = JsonRpcDispatcher()
 
@@ -147,8 +151,14 @@ def main():
         name="remove", method=reg.try_remove, converter=lambda data: data["name"]
     )
 
-    handle_response(dispatcher(make_request_to_add_user()))
-    handle_response(dispatcher(make_request_to_add_user()))
+    handle_response(await dispatcher(make_request_to_add_user()))
+    handle_response(await dispatcher(make_request_to_add_user()))
+    handle_response(await dispatcher(make_request_to_get_user()))
+    handle_response(await dispatcher(make_request_to_remove_user("Foo")))
+
+
+def main():
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":

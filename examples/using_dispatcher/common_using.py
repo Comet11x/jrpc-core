@@ -1,3 +1,5 @@
+import asyncio
+
 from jrpc_core import (
     JsonRpcDispatcher,
     JsonRpcError,
@@ -41,19 +43,23 @@ def handle_response(maybe_res: Option[Result[JsonRpcResponse, JsonRpcError]]):
         print("Error: option is empty")
 
 
-def main():
+async def async_main():
     mw1 = JsonRpcMethodWrapper(name="concat", method=foo)
     mw2 = JsonRpcMethodWrapper(name="sum", method=bar)
     dispatcher = JsonRpcDispatcher()
     dispatcher.request_handler_registry.add(mw1)
     dispatcher.request_handler_registry.add(mw2)
     dispatcher.notification_handler_registry.add(mw2)
-    maybe_res1 = dispatcher(get_request_1())
-    maybe_res2 = dispatcher(get_request_2())
-    maybe_res3 = dispatcher(get_notification())
+    maybe_res1 = await dispatcher(get_request_1())
+    maybe_res2 = await dispatcher(get_request_2())
+    maybe_res3 = await dispatcher(get_notification())
     handle_response(maybe_res1)
     handle_response(maybe_res2)
     handle_response(maybe_res3)
+
+
+def main():
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":

@@ -647,8 +647,9 @@ class JsonRpcDispatcher:
             return (await self._handle_notification(data)).map(lambda err: Err(err))
         elif isinstance(data, JsonRpcRequest):
             return Some(Ok(await self._handle_request(data)))
-        elif isinstance(data, JsonRpcResponse):
-            self._response_handler.map(lambda fn: await fn(data))
+        elif isinstance(data, JsonRpcResponse) and self._response_handler.is_some():
+            fn = self._response_handler.unwrap()
+            await fn(data)
             return Nothing()
         elif isinstance(data, Result):
             if data.is_ok():

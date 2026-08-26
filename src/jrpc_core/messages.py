@@ -164,6 +164,15 @@ class JsonRpcError(_StrictModel):
         return JsonRpcError(code=JsonRpcErrorCode.default())
 
     @staticmethod
+    def from_data(
+        *,
+        data: Any,
+        code: JsonRpcErrorCode = JsonRpcErrorCode.InternalError,
+        message: str = JsonRpcErrorCode.InternalError.description(),
+    ) -> JsonRpcError:
+        return JsonRpcError(code=code, message=message, data=data)
+
+    @staticmethod
     def from_error(error: JsonRpcError | Any) -> JsonRpcError:
         """Convert an arbitrary value into a :class:`JsonRpcError`.
 
@@ -185,23 +194,18 @@ class JsonRpcError(_StrictModel):
                 Option[int | JsonRpcErrorCode],
                 Result.try_call(getattr, cast(Any, error), "code").ok(),
             )
-            code = (
-                int(maybe_code.unwrap())
-                if maybe_code.is_some()
-                else JsonRpcErrorCode.InternalError
-            )
             maybe_message: Option[str] = Result.try_call(
                 getattr, cast(error, Any), "message"
             )
-            if maybe_message.is_some():
+            maybe_data: Option[str] = Result.try_call(getattr, cast(error, Any), "data")
+            if maybe_code.is_some() and maybe_message.is_some():
+                code = maybe_code.unwrap()
                 message = maybe_message.unwrap()
+                data = maybe_data.unwrap_or(None)
+                return JsonRpcError(code=code, message=message, data=data)
             else:
-                message = (
-                    code.description()
-                    if isinstance(code, JsonRpcErrorCode)
-                    else "Unknown error"
-                )
-            return JsonRpcError(code=code, message=message, data=error)
+                code = JsonRpcErrorCode.InternalError
+                return JsonRpcError(code=code, message=code.description(), data=error)
 
     @staticmethod
     def try_from(value: Option[JsonRpcError | Any]) -> Option[JsonRpcError]:

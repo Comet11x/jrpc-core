@@ -360,16 +360,12 @@ class TestTryParse:
         assert msg.method == "add"
 
     def test_parse_notification(self):
-        # NOTE: try_parse always succeeds as JsonRpcRequest because
-        # JsonRpcRequest defaults `id` via uuid4(). This means notifications
-        # without `id` are parsed as requests, not notifications.
         raw = json.dumps({"jsonrpc": "2.0", "method": "evt"})
         result = try_parse(raw)
         assert result.is_ok()
         msg = result.unwrap()
-        assert isinstance(msg, JsonRpcRequest)
+        assert isinstance(msg, JsonRpcNotification)
         assert msg.method == "evt"
-        assert isinstance(msg.id, str)
 
     def test_parse_invalid(self):
         result = try_parse("not json at all")
@@ -382,3 +378,36 @@ class TestTryParse:
     def test_parse_invalid_json_syntax(self):
         result = try_parse("{bad")
         assert result.is_err()
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage
+# ---------------------------------------------------------------------------
+
+
+class TestJsonRpcErrorFromData:
+    def test_from_data(self):
+        err = JsonRpcError.from_data(data={"detail": "oops"})
+        assert err.code is JsonRpcErrorCode.InternalError
+        assert err.message == "Internal error"
+        assert err.data == {"detail": "oops"}
+
+    def test_from_data_custom_code_and_message(self):
+        err = JsonRpcError.from_data(
+            data="bad input",
+            code=JsonRpcErrorCode.InvalidParams,
+            message="invalid",
+        )
+        assert err.code is JsonRpcErrorCode.InvalidParams
+        assert err.message == "invalid"
+        assert err.data == "bad input"
+
+
+class TestSerializeAliases:
+    def test_request_serialize(self):
+        req = JsonRpcRequest(method="m", id=1)
+        assert req.serialize() == req.to_json()
+
+    def test_notification_serialize(self):
+        n = JsonRpcNotification(method="evt")
+        assert n.serialize() == n.to_json()

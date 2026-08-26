@@ -54,6 +54,7 @@ class JsonRpcErrorCode(Enum)
 | `MethodNotFound` | `-32601` | メソッドが存在しないか、利用できません。 |
 | `InvalidRequest` | `-32600` | 送信された JSON は有効なリクエストオブジェクトではありません。 |
 | `ExecutionError` | `-32000` | サーバー定義の実行エラーが発生しました。 |
+| `ConversionError` | `-32001` | サーバー定義の変換エラーが発生しました。 |
 
 ### メソッド
 
@@ -144,6 +145,25 @@ JSON-RPC 2.0 エラーオブジェクト。
 ```python
 >>> JsonRpcError.default()
 JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Something went wrong', data=None)
+```
+
+#### `from_data(*, data: Any, code: JsonRpcErrorCode = InternalError, message: str = ...) -> JsonRpcError` *(static)*
+
+任意のデータから明示的なコードとメッセージで `JsonRpcError` を作成します。
+
+| パラメータ | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `data` | `Any` | *（必須）* | エラーに添付される追加ペイロード。 |
+| `code` | `JsonRpcErrorCode` | `InternalError` | エラーコード。 |
+| `message` | `str` | `InternalError.description()` | 短い人間が読める説明。 |
+
+**戻り値：** 新しい `JsonRpcError` インスタンス。
+
+```python
+>>> JsonRpcError.from_data(data={"detail": "oops"})
+JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Internal error', data={'detail': 'oops'})
+>>> JsonRpcError.from_data(data="bad", code=JsonRpcErrorCode.InvalidParams, message="invalid")
+JsonRpcError(code=<JsonRpcErrorCode.InvalidParams: -32602>, message='invalid', data='bad')
 ```
 
 #### `from_error(error: JsonRpcError | Any) -> JsonRpcError` *(static)*
@@ -247,6 +267,12 @@ True
 
 **戻り値：** このリクエストのコンパクトな JSON 表現。
 
+#### `serialize() -> str`
+
+リクエストを JSON 文字列にシリアライズします。`to_json()` のエイリアスです。
+
+**戻り値：** このリクエストのコンパクトな JSON 表現。
+
 #### `into(result: Result[Any, JsonRpcError]) -> JsonRpcResponse`
 
 ハンドラの結果から `JsonRpcResponse` を作成します。`Result`、`JsonRpcError`、または生の値を受け付けます。
@@ -320,6 +346,12 @@ JSON 文字列から通知を構築しようします。
 
 **戻り値：** この通知のコンパクトな JSON 表現。
 
+#### `serialize() -> str`
+
+通知を JSON 文字列にシリアライズします。`to_json()` のエイリアスです。
+
+**戻り値：** この通知のコンパクトな JSON 表現。
+
 ---
 
 ## `JsonRpcResponse`
@@ -371,7 +403,7 @@ JsonRpcResponse(id=2, result=None, error=JsonRpcError(...), ...)
 | パラメータ | 型 | 説明 |
 |---|---|---|
 | `id` | `JsonRpcId` | エコーバックするリクエスト識別子。 |
-| `error` | `JsonRpcError` | 含めるエラー。 |
+| `error` | `JsonRpcError \| Exception` | 含めるエラー。 |
 
 **戻り値：** `error` のみが設定された `JsonRpcResponse`。
 
@@ -418,25 +450,27 @@ JSON 文字列からレスポンスを構築しようします。
 
 **戻り値：** このレスポンスのコンパクトな JSON 表現。
 
+#### `serialize() -> str`
+
+レスポンスを JSON 文字列にシリアライズします。`to_json()` のエイリアスです。
+
+**戻り値：** このレスポンスのコンパクトな JSON 表現。
+
 ---
 
 ## `try_parse()`
 
 ```python
-def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]
+def try_parse(data: str) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]
 ```
 
-JSON 文字列を JSON-RPC メッセージとしてパースしようします。関数はまず `JsonRpcRequest` としてパースを試み、失敗した場合は `JsonRpcNotification` にフォールバックします。両方が失敗した場合、リクエストの試行からのパースエラーが返されます。
+JSON 文字列を JSON-RPC メッセージとしてパースしようします。関数はまず `JsonRpcResponse` としてパースを試み、失敗した場合は `JsonRpcNotification` にフォールバックし、さらに失敗した場合は `JsonRpcRequest` にフォールバックします。すべて失敗した場合、リクエストの試行からのパースエラーが返されます。
 
 | パラメータ | 型 | 説明 |
 |---|---|---|
 | `data` | `str` | JSON エンコード文字列。 |
 
-**戻り値：** 成功時は `Ok(request | notification)`、パース失敗を含む `Err(JsonRpcError)`。
-
-::: warning
-`JsonRpcRequest` は `id` を `uuid4()` でデフォルト設定するため、通知ペイロード（`id` なし）はリクエストとして成功します。通知形式を強制する場合は `JsonRpcNotification.try_from_json` を直接使用してください。
-:::
+**戻り値：** 成功時は `Ok(request | notification | response)`、パース失敗を含む `Err(JsonRpcError)`。
 
 ```python
 >>> try_parse('{"jsonrpc":"2.0","method":"add","id":1}')

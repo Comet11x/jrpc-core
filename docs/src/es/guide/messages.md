@@ -54,6 +54,7 @@ Enumeración de códigos de error estándar de JSON-RPC 2.0. Cada miembro corres
 | `MethodNotFound` | `-32601` | El método no existe o no está disponible. |
 | `InvalidRequest` | `-32600` | El JSON enviado no es un objeto de solicitud válido. |
 | `ExecutionError` | `-32000` | Ocurrió un error de ejecución definido por el servidor. |
+| `ConversionError` | `-32001` | Ocurrió un error de conversión definido por el servidor. |
 
 ### Métodos
 
@@ -144,6 +145,25 @@ Retorna un error predeterminado con `JsonRpcErrorCode.InternalError`.
 ```python
 >>> JsonRpcError.default()
 JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Something went wrong', data=None)
+```
+
+#### `from_data(*, data: Any, code: JsonRpcErrorCode = InternalError, message: str = ...) -> JsonRpcError` *(estático)*
+
+Crea un `JsonRpcError` a partir de datos arbitrarios con código y mensaje explícitos.
+
+| Parámetro | Tipo | Predeterminado | Descripción |
+|---|---|---|---|
+| `data` | `Any` | *(requerido)* | Carga adicional adjunta al error. |
+| `code` | `JsonRpcErrorCode` | `InternalError` | El código de error. |
+| `message` | `str` | `InternalError.description()` | Una descripción corta legible para humanos. |
+
+**Retorna:** Una nueva instancia de `JsonRpcError`.
+
+```python
+>>> JsonRpcError.from_data(data={"detail": "oops"})
+JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Internal error', data={'detail': 'oops'})
+>>> JsonRpcError.from_data(data="bad", code=JsonRpcErrorCode.InvalidParams, message="invalid")
+JsonRpcError(code=<JsonRpcErrorCode.InvalidParams: -32602>, message='invalid', data='bad')
 ```
 
 #### `from_error(error: JsonRpcError | Any) -> JsonRpcError` *(estático)*
@@ -247,6 +267,12 @@ Serializa la solicitud a una cadena JSON.
 
 **Retorna:** Una representación JSON compacta de esta solicitud.
 
+#### `serialize() -> str`
+
+Serializa la solicitud a una cadena JSON. Alias de `to_json()`.
+
+**Retorna:** Una representación JSON compacta de esta solicitud.
+
 #### `into(result: Result[Any, JsonRpcError]) -> JsonRpcResponse`
 
 Crea un `JsonRpcResponse` a partir del resultado de un handler. Acepta un `Result`, un `JsonRpcError`, o un valor crudo.
@@ -320,6 +346,12 @@ Serializa la notificación a una cadena JSON.
 
 **Retorna:** Una representación JSON compacta de esta notificación.
 
+#### `serialize() -> str`
+
+Serializa la notificación a una cadena JSON. Alias de `to_json()`.
+
+**Retorna:** Una representación JSON compacta de esta notificación.
+
 ---
 
 ## `JsonRpcResponse`
@@ -371,7 +403,7 @@ Construye una respuesta de error.
 | Parámetro | Tipo | Descripción |
 |---|---|---|
 | `id` | `JsonRpcId` | El identificador de la solicitud a resonar. |
-| `error` | `JsonRpcError` | El error a incluir. |
+| `error` | `JsonRpcError \| Exception` | El error a incluir. |
 
 **Retorna:** Un `JsonRpcResponse` con solo `error` establecido.
 
@@ -418,25 +450,27 @@ Serializa la respuesta a una cadena JSON.
 
 **Retorna:** Una representación JSON compacta de esta respuesta.
 
+#### `serialize() -> str`
+
+Serializa la respuesta a una cadena JSON. Alias de `to_json()`.
+
+**Retorna:** Una representación JSON compacta de esta respuesta.
+
 ---
 
 ## `try_parse()`
 
 ```python
-def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]
+def try_parse(data: str) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]
 ```
 
-Intenta parsear una cadena JSON como un mensaje JSON-RPC. La función primero intenta parsear como `JsonRpcRequest`; si falla, recurre a `JsonRpcNotification`. Si ambas fallan, se retorna el error de parseo del intento de solicitud.
+Intenta parsear una cadena JSON como un mensaje JSON-RPC. La función primero intenta parsear como `JsonRpcResponse`; si falla, recurre a `JsonRpcNotification`; si falla, recurre a `JsonRpcRequest`. Si todas fallan, se retorna el error de parseo del intento de solicitud.
 
 | Parámetro | Tipo | Descripción |
 |---|---|---|
 | `data` | `str` | Una cadena codificada en JSON. |
 
-**Retorna:** `Ok(solicitud | notificación)` en éxito, o `Err(JsonRpcError)` con el fallo de parseo.
-
-::: warning
-Debido a que `JsonRpcRequest` establece `id` por defecto con `uuid4()`, una carga de notificación (sin `id`) tendrá éxito como solicitud. Use `JsonRpcNotification.try_from_json` directamente cuando necesite forzar la forma de notificación.
-:::
+**Retorna:** `Ok(respuesta | notificación | solicitud)` en éxito, o `Err(JsonRpcError)` con el fallo de parseo.
 
 ```python
 >>> try_parse('{"jsonrpc":"2.0","method":"add","id":1}')

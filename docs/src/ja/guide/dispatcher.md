@@ -7,6 +7,7 @@ from jrpc_core.dispatcher import (
     JsonRpcDispatcher,
     JsonRpcMethodWrapper,
     JsonRpcHandlerCollection,
+    JsonRpcResponseCtorWrapper,
 )
 ```
 
@@ -27,7 +28,8 @@ JsonRpcMethodWrapper(
     *,
     name: str,
     method: Callable[..., Any],
-    validators: list[Callable[..., Option[JsonRpcError]]] | None = None,
+    validator: Callable[..., Option[JsonRpcError] | bool] | None = None,
+    converter: Callable[..., Option[Any] | Result[Any, Exception | JsonRpcError] | Any] | None = None,
 )
 ```
 
@@ -35,7 +37,8 @@ JsonRpcMethodWrapper(
 |---|---|---|---|
 | `name` | `str` | *（必須）* | JSON-RPC メソッド名。 |
 | `method` | `Callable[..., Any]` | *（必須）* | このメソッドがディスパッチされたときに呼び出されるコール可能な関数。 |
-| `validators` | `list[Callable[..., Option[JsonRpcError]]] \| None` | `None` | パラメータのパラメータを解析し、拒否シグナルを返すコール可能な関数のオプションリスト。 |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | 解析済みの `params` を受け取り、拒否シグナルを返すオプションのコール可能な関数。 |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | メソッドが呼び出される前にパラメータを変換するオプションのコール可能な関数。 |
 
 ### バリデータプロトコル
 
@@ -47,6 +50,19 @@ JsonRpcMethodWrapper(
 | `False` | 汎用の `InvalidParams` エラーで拒否 |
 | `Exception` または `JsonRpcError` | そのエラーで直接拒否 |
 | `True`、`None`、またはその他の真値 | 承認 — 次のバリデータまたはメソッド呼び出しに進む |
+
+### コンバータプロトコル
+
+コンバータは生の `params` ペイロードを受け取り、以下を返すことができます：
+
+| 戻り値 | 動作 |
+|---|---|
+| `Some(value)` | `value` をメソッド引数として使用 |
+| `Nothing()` | `ConversionError` で拒否 |
+| `Ok(value)` | `value` をメソッド引数として使用 |
+| `Err(reason)` | `ConversionError` で拒否し、`reason` を `data` に添付 |
+| その他の値 | その値を直接メソッド引数として使用 |
+| `Exception` を送出 | `ConversionError` で拒否し、例外を `data` に添付 |
 
 ### 属性
 
@@ -64,13 +80,13 @@ JsonRpcMethodWrapper(
 
 メソッド名で2つのラッパーを比較します。
 
-#### `__call__(args: Option[Any]) -> Result[Any, JsonRpcError]`
+#### `__call__(params: Option[Any]) -> Result[Any, JsonRpcError]`
 
-オプションのパラメータ付きでラップされたメソッドを実行します。バリデータはメソッドの前に実行されます。バリデータがパラメータを拒否した場合、呼び出しは `Err` で短絡されます。
+オプションのパラメータ付きでラップされたメソッドを実行します。バリデーションが最初に実行され、次にコンバータが実行されます。どちらのステップでもパラメータが拒否された場合、呼び出しは `Err` で短絡されます。
 
 | パラメータ | 型 | 説明 |
 |---|---|---|
-| `args` | `Option[Any]` | メソッドパラメータを含む `Option`。`Some` はパラメータが提供されたことを意味し、`None` はパラメータがないことを意味します。 |
+| `params` | `Option[Any]` | メソッドパラメータを含む `Option`。`Some` はパラメータが提供されたことを意味し、`Nothing` はパラメータがないことを意味します。 |
 
 **戻り値：** 成功時は `Ok(result)`、失敗時は `Err(JsonRpcError)`。
 
@@ -186,10 +202,22 @@ class JsonRpcDispatcher
 ### コンストラクタ
 
 ```python
-JsonRpcDispatcher()
+JsonRpcDispatcher(
+    response_handler: Callable[[JsonRpcResponse], None] | None = None,
+)
 ```
 
-空のハンドラレジストリでディスパッチャを初期化します。
+| パラメータ | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `response_handler` | `Callable[[JsonRpcResponse], None] \| None` | `None` | `JsonRpcResponse` が直接ディスパッチされたときに呼び出されるオプションのコールバック。 |
+
+### クラス属性
+
+| 属性 | 型 | 説明 |
+|---|---|---|
+| `ERROR_CASE` | `JsonRpcResponseCtorWrapper.State` | エラーレスポンスの結果セレクタ。 |
+| `RESULT_CASE` | `JsonRpcResponseCtorWrapper.State` | 成功結果の結果セレクタ。 |
+| `BOTH_CASES` | `JsonRpcResponseCtorWrapper._When` | 両方の結果に一致する結果セレクタ。 |
 
 ### 属性
 
@@ -200,13 +228,57 @@ JsonRpcDispatcher()
 
 ### メソッド
 
-#### `__call__(data: str | JsonRpcRequest | JsonRpcNotification) -> Option[Result[JsonRpcResponse, JsonRpcError]]`
+#### `emplace_request_handler(*, name, method, validator=None, converter=None) -> bool`
+
+リクエストハンドラを1つの呼び出しで登録します。`request_handler_registry.add(JsonRpcMethodWrapper(...))` の便利なラッパーです。
+
+| パラメータ | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `name` | `str` | *（必須）* | JSON-RPC メソッド名。 |
+| `method` | `Callable[..., Any]` | *（必須）* | ディスパッチされたときに呼び出されるコール可能な関数。 |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | オプションのパラメータバリデータ。 |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | オプションのパラメータコンバータ。 |
+
+**戻り値：** 新規に登録された場合は `True`、名前がすでに存在する場合は `False`。
+
+#### `emplace_notification_handler(*, name, method, validator=None, converter=None) -> bool`
+
+通知ハンドラを1つの呼び出しで登録します。`notification_handler_registry.add(JsonRpcMethodWrapper(...))` の便利なラッパーです。
+
+| パラメータ | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `name` | `str` | *（必須）* | JSON-RPC メソッド名。 |
+| `method` | `Callable[..., Any]` | *（必須）* | ディスパッチされたときに呼び出されるコール可能な関数。 |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | オプションのパラメータバリデータ。 |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | オプションのパラメータコンバータ。 |
+
+**戻り値：** 新規に登録された場合は `True`、名前がすでに存在する場合は `False`。
+
+#### `emplace_custom_response_ctor(method, ctor, *states)`
+
+メソッドにカスタムレスポンスコンストラクタを登録します。
+
+| パラメータ | 型 | 説明 |
+|---|---|---|
+| `method` | `str` | コンストラクタが適用される JSON-RPC メソッド名。 |
+| `ctor` | `Callable[..., JsonRpcResponse]` | `JsonRpcResponse` を構築するコール可能な関数。 |
+| `*states` | `JsonRpcResponseCtorWrapper.State` | コンストラクタが使用される状態を制限するオプションのステータスメンバー。 |
+
+#### `add_custom_response_ctor(ctor: JsonRpcResponseCtorWrapper)`
+
+事前に構築されたカスタムレスポンスコンストラクタを登録します。同じメソッドに以前に登録されたコンストラクタを置き換えます。
+
+| パラメータ | 型 | 説明 |
+|---|---|---|
+| `ctor` | `JsonRpcResponseCtorWrapper` | コンストラクタをメソッド名にバインドするラッパー。 |
+
+#### `__call__(data) -> Option[Result[JsonRpcResponse, JsonRpcError]]`
 
 JSON-RPC メッセージをディスパッチします。
 
 | パラメータ | 型 | 説明 |
 |---|---|---|
-| `data` | `str \| JsonRpcRequest \| JsonRpcNotification` | JSON 文字列、`JsonRpcRequest`、または `JsonRpcNotification`。 |
+| `data` | `str \| JsonRpcRequest \| JsonRpcNotification \| JsonRpcResponse \| Result[...]` | JSON 文字列、`JsonRpcRequest`、`JsonRpcNotification`、`JsonRpcResponse`、または `Result`。 |
 
 **戻り値：**
 
@@ -230,12 +302,58 @@ True
 3
 ```
 
-#### `try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]` *(classmethod)*
+#### `try_parse(data: str) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]` *(classmethod)*
 
-JSON 文字列をリクエストまたは通知にパースしようします。まず `JsonRpcRequest` を試み、失敗した場合は `JsonRpcNotification` にフォールバックします。
+JSON 文字列をレスポンス、リクエスト、または通知にパースしようします。まず `JsonRpcResponse` を試み、失敗した場合は `JsonRpcNotification` にフォールバックし、さらに失敗した場合は `JsonRpcRequest` にフォールバックします。
 
 | パラメータ | 型 | 説明 |
 |---|---|---|
 | `data` | `str` | JSON エンコード文字列。 |
 
-**戻り値：** 成功時は `Ok(request | notification)`、パース失敗時は `Err(JsonRpcError)`。
+**戻り値：** 成功時は `Ok(response | notification | request)`、パース失敗時は `Err(JsonRpcError)`。
+
+---
+
+## `JsonRpcResponseCtorWrapper`
+
+```python
+class JsonRpcResponseCtorWrapper
+```
+
+カスタムの `JsonRpcResponse` コンストラクタをメソッド名にバインドします。ラッパーはコンストラクタがいつ適用されるかを記録します — 成功結果、エラー、または両方 — これによりディスパッチャは結果ごとに適切なレスポンスタイプを選択できます。
+
+### コンストラクタ
+
+```python
+JsonRpcResponseCtorWrapper(
+    method: str,
+    ctor: Callable[..., JsonRpcResponse],
+    *states: JsonRpcResponseCtorWrapper.State,
+)
+```
+
+| パラメータ | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `method` | `str` | *（必須）* | このコンストラクタが適用される JSON-RPC メソッド名。 |
+| `ctor` | `Callable[..., JsonRpcResponse]` | *（必須）* | キーワード引数（`id`、`result` または `error`、`jsonrpc`）を受け取り `JsonRpcResponse` を返すコール可能な関数。 |
+| `*states` | `State` | 両方の結果 | コンストラクタが使用される場面を制限するオプションの `State` メンバー。 |
+
+### 内部クラス: `State`
+
+```python
+class State(Enum)
+```
+
+コンストラクタが適用される場面を制御する結果セレクタ。
+
+| メンバー | 値 | 説明 |
+|---|---|---|
+| `Result` | `1` | 成功結果を処理するコンストラクタ。 |
+| `Error` | `2` | エラーレスポンスを処理するコンストラクタ。 |
+
+### 属性
+
+| 属性 | 型 | 説明 |
+|---|---|---|
+| `method` | `str` | このコンストラクタがバインドされている JSON-RPC メソッド名。 |
+| `when` | `_When` | このコンストラクタの結果セレクタ。 |

@@ -54,6 +54,7 @@ class JsonRpcErrorCode(Enum)
 | `MethodNotFound` | `-32601` | 方法不存在或不可用。 |
 | `InvalidRequest` | `-32600` | 发送的 JSON 不是有效的请求对象。 |
 | `ExecutionError` | `-32000` | 发生服务器定义的执行错误。 |
+| `ConversionError` | `-32001` | 发生服务器定义的转换错误。 |
 
 ### 方法
 
@@ -144,6 +145,25 @@ JSON-RPC 2.0 错误对象。
 ```python
 >>> JsonRpcError.default()
 JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Something went wrong', data=None)
+```
+
+#### `from_data(*, data: Any, code: JsonRpcErrorCode = InternalError, message: str = ...) -> JsonRpcError` *(static)*
+
+使用显式的代码和消息从任意数据创建 `JsonRpcError`。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `data` | `Any` | *（必填）* | 附加到错误的额外载荷。 |
+| `code` | `JsonRpcErrorCode` | `InternalError` | 错误码。 |
+| `message` | `str` | `InternalError.description()` | 简短的人类可读描述。 |
+
+**返回值：** 一个新的 `JsonRpcError` 实例。
+
+```python
+>>> JsonRpcError.from_data(data={"detail": "oops"})
+JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Internal error', data={'detail': 'oops'})
+>>> JsonRpcError.from_data(data="bad", code=JsonRpcErrorCode.InvalidParams, message="invalid")
+JsonRpcError(code=<JsonRpcErrorCode.InvalidParams: -32602>, message='invalid', data='bad')
 ```
 
 #### `from_error(error: JsonRpcError | Any) -> JsonRpcError` *(static)*
@@ -247,6 +267,12 @@ True
 
 **返回值：** 此请求的紧凑 JSON 表示。
 
+#### `serialize() -> str`
+
+将请求序列化为 JSON 字符串。`to_json()` 的别名。
+
+**返回值：** 此请求的紧凑 JSON 表示。
+
 #### `into(result: Result[Any, JsonRpcError]) -> JsonRpcResponse`
 
 从处理程序结果创建 `JsonRpcResponse`。接受 `Result`、`JsonRpcError` 或原始值。
@@ -320,6 +346,12 @@ JSON-RPC 2.0 通知对象。与请求相同，但省略 `id` 字段，表示不�
 
 **返回值：** 此通知的紧凑 JSON 表示。
 
+#### `serialize() -> str`
+
+将通知序列化为 JSON 字符串。`to_json()` 的别名。
+
+**返回值：** 此通知的紧凑 JSON 表示。
+
 ---
 
 ## `JsonRpcResponse`
@@ -371,7 +403,7 @@ JsonRpcResponse(id=2, result=None, error=JsonRpcError(...), ...)
 | 参数 | 类型 | 描述 |
 |---|---|---|
 | `id` | `JsonRpcId` | 要回传的请求标识符。 |
-| `error` | `JsonRpcError` | 要包含的错误。 |
+| `error` | `JsonRpcError \| Exception` | 要包含的错误。 |
 
 **返回值：** 仅设置了 `error` 的 `JsonRpcResponse`。
 
@@ -418,25 +450,27 @@ JsonRpcResponse(id=2, result=None, error=JsonRpcError(...), ...)
 
 **返回值：** 此响应的紧凑 JSON 表示。
 
+#### `serialize() -> str`
+
+将响应序列化为 JSON 字符串。`to_json()` 的别名。
+
+**返回值：** 此响应的紧凑 JSON 表示。
+
 ---
 
 ## `try_parse()`
 
 ```python
-def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]
+def try_parse(data: str) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]
 ```
 
-尝试将 JSON 字符串解析为 JSON-RPC 消息。函数首先尝试解析为 `JsonRpcRequest`；如果失败则回退到 `JsonRpcNotification`。如果两者都失败，则返回请求尝试时的解析错误。
+尝试将 JSON 字符串解析为 JSON-RPC 消息。函数首先尝试解析为 `JsonRpcResponse`；如果失败则回退到 `JsonRpcNotification`；如果再失败则回退到 `JsonRpcRequest`。如果全部失败，则返回请求尝试时的解析错误。
 
 | 参数 | 类型 | 描述 |
 |---|---|---|
 | `data` | `str` | JSON 编码字符串。 |
 
-**返回值：** 成功时返回 `Ok(request | notification)`，包含解析失败信息的 `Err(JsonRpcError)`。
-
-::: warning
-因为 `JsonRpcRequest` 通过 `uuid4()` 为 `id` 提供默认值，所以通知载荷（无 `id`）作为请求会成功。当需要强制通知形式时，请直接使用 `JsonRpcNotification.try_from_json`。
-:::
+**返回值：** 成功时返回 `Ok(request | notification | response)`，包含解析失败信息的 `Err(JsonRpcError)`。
 
 ```python
 >>> try_parse('{"jsonrpc":"2.0","method":"add","id":1}')

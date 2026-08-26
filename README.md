@@ -3,7 +3,8 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/jrpc-core.svg)](https://pypi.org/project/jrpc-core)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/jrpc-core.svg)](https://pypi.org/project/jrpc-core)
 [![Tests](https://github.com/comet11x/jrpc-core/actions/workflows/test.yml/badge.svg)](https://github.com/comet11x/jrpc-core/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/comet11x/jrpc-core/branch/main/graph/badge.svg)](https://codecov.io/gh/comet11x/jrpc-core)
+[![Coverage Status](https://coveralls.io/repos/github/Comet11x/jrpc-core/badge.svg?branch=dev)](https://coveralls.io/github/Comet11x/jrpc-core?branch=dev)
+<!-- [![codecov](https://codecov.io/gh/comet11x/jrpc-core/branch/main/graph/badge.svg)](https://codecov.io/gh/comet11x/jrpc-core) -->
 
 -----
 

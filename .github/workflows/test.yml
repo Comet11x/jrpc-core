@@ -13,14 +13,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install curl
+        run: |
+          apt-get update
+          apt-get install -y curl
+
       - name: Install Hatch
         run: pip install hatch
 
       - name: Run tests
         run: hatch run test:run --cov=jrpc_core --cov=tests --cov-report=xml
 
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@v2
         with:
-          name: coverage-report
-          path: coverage.xml
+          file: coverage.xml
+          format: cobertura
+        env:
+          COVERALLS_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}

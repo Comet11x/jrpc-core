@@ -54,6 +54,7 @@ class JsonRpcErrorCode(Enum)
 | `MethodNotFound` | `-32601` | 메서드가 존재하지 않거나 사용할 수 없습니다. |
 | `InvalidRequest` | `-32600` | 전송된 JSON이 유효한 요청 객체가 아닙니다. |
 | `ExecutionError` | `-32000` | 서버 정의 실행 오류가 발생했습니다. |
+| `ConversionError` | `-32001` | 서버 정의 변환 오류가 발생했습니다. |
 
 ### 메서드
 
@@ -144,6 +145,25 @@ JSON-RPC 2.0 오류 객체입니다.
 ```python
 >>> JsonRpcError.default()
 JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Something went wrong', data=None)
+```
+
+#### `from_data(*, data: Any, code: JsonRpcErrorCode = InternalError, message: str = ...) -> JsonRpcError` *(정적)*
+
+임의의 데이터에서 명시적인 코드와 메시지를 사용하여 `JsonRpcError`를 생성합니다.
+
+| 매개변수 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `data` | `Any` | *(필수)* | 오류에 첨부되는 추가 페이로드. |
+| `code` | `JsonRpcErrorCode` | `InternalError` | 오류 코드. |
+| `message` | `str` | `InternalError.description()` | 짧은 사람이 읽을 수 있는 설명. |
+
+**반환값:** 새로운 `JsonRpcError` 인스턴스.
+
+```python
+>>> JsonRpcError.from_data(data={"detail": "oops"})
+JsonRpcError(code=<JsonRpcErrorCode.InternalError: -32603>, message='Internal error', data={'detail': 'oops'})
+>>> JsonRpcError.from_data(data="bad", code=JsonRpcErrorCode.InvalidParams, message="invalid")
+JsonRpcError(code=<JsonRpcErrorCode.InvalidParams: -32602>, message='invalid', data='bad')
 ```
 
 #### `from_error(error: JsonRpcError | Any) -> JsonRpcError` *(정적)*
@@ -247,6 +267,12 @@ True
 
 **반환값:** 이 요청의 축약된 JSON 표현.
 
+#### `serialize() -> str`
+
+요청을 JSON 문자열로 직렬화합니다. `to_json()`의 별칭입니다.
+
+**반환값:** 이 요청의 축약된 JSON 표현.
+
 #### `into(result: Result[Any, JsonRpcError]) -> JsonRpcResponse`
 
 핸들러 결과에서 `JsonRpcResponse`를 생성합니다. `Result`, `JsonRpcError`, 또는 원시 값을 허용합니다.
@@ -320,6 +346,12 @@ JSON 문자열에서 알림을 생성하려고 시도합니다.
 
 **반환값:** 이 알림의 축약된 JSON 표현.
 
+#### `serialize() -> str`
+
+알림을 JSON 문자열로 직렬화합니다. `to_json()`의 별칭입니다.
+
+**반환값:** 이 알림의 축약된 JSON 표현.
+
 ---
 
 ## `JsonRpcResponse`
@@ -371,7 +403,7 @@ JsonRpcResponse(id=2, result=None, error=JsonRpcError(...), ...)
 | 매개변수 | 타입 | 설명 |
 |---|---|---|
 | `id` | `JsonRpcId` | 에코할 요청 식별자. |
-| `error` | `JsonRpcError` | 포함할 오류. |
+| `error` | `JsonRpcError \| Exception` | 포함할 오류. |
 
 **반환값:** `error`만 설정된 `JsonRpcResponse`.
 
@@ -418,25 +450,27 @@ JSON 문자열에서 응답을 생성하려고 시도합니다.
 
 **반환값:** 이 응답의 축약된 JSON 표현.
 
+#### `serialize() -> str`
+
+응답을 JSON 문자열로 직렬화합니다. `to_json()`의 별칭입니다.
+
+**반환값:** 이 응답의 축약된 JSON 표현.
+
 ---
 
 ## `try_parse()`
 
 ```python
-def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]
+def try_parse(data: str) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]
 ```
 
-JSON 문자열을 JSON-RPC 메시지로 파싱하려고 시도합니다. 함수는 먼저 `JsonRpcRequest`로 파싱을 시도하고, 실패하면 `JsonRpcNotification`으로 대체합니다. 둘 다 실패하면 요청 시도의 파싱 오류가 반환됩니다.
+JSON 문자열을 JSON-RPC 메시지로 파싱하려고 시도합니다. 함수는 먼저 `JsonRpcResponse`로 파싱을 시도하고, 실패하면 `JsonRpcNotification`으로, 실패하면 `JsonRpcRequest`로 대체합니다. 모두 실패하면 요청 시도의 파싱 오류가 반환됩니다.
 
 | 매개변수 | 타입 | 설명 |
 |---|---|---|
 | `data` | `str` | JSON 인코딩 문자열. |
 
-**반환값:** 성공 시 `Ok(request | notification)`, 파싱 실패를 포함하는 `Err(JsonRpcError)`.
-
-::: warning
-`JsonRpcRequest`가 `uuid4()`를 통해 `id`를 기본값으로 설정하므로, 알림 페이로드 ( `id` 없음)은 요청으로 성공합니다. 알림 형식을 강제화해야 할 때는 `JsonRpcNotification.try_from_json`을 직접 사용하세요.
-:::
+**반환값:** 성공 시 `Ok(response | notification | request)`, 파싱 실패를 포함하는 `Err(JsonRpcError)`.
 
 ```python
 >>> try_parse('{"jsonrpc":"2.0","method":"add","id":1}')

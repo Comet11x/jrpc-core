@@ -7,6 +7,7 @@ from jrpc_core.dispatcher import (
     JsonRpcDispatcher,
     JsonRpcMethodWrapper,
     JsonRpcHandlerCollection,
+    JsonRpcResponseCtorWrapper,
 )
 ```
 
@@ -27,7 +28,8 @@ JsonRpcMethodWrapper(
     *,
     name: str,
     method: Callable[..., Any],
-    validators: list[Callable[..., Option[JsonRpcError]]] | None = None,
+    validator: Callable[..., Option[JsonRpcError] | bool] | None = None,
+    converter: Callable[..., Option[Any] | Result[Any, Exception | JsonRpcError] | Any] | None = None,
 )
 ```
 
@@ -35,7 +37,8 @@ JsonRpcMethodWrapper(
 |---|---|---|---|
 | `name` | `str` | *(obbligatorio)* | Il nome del metodo JSON-RPC. |
 | `method` | `Callable[..., Any]` | *(obbligatorio)* | Il callable da invocare quando questo metodo viene dispatchato. |
-| `validators` | `list[Callable[..., Option[JsonRpcError]]] \| None` | `None` | Una lista opzionale di callable che ricevono i `params` analizzati e restituiscono un segnale di rifiuto. |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | Un callable opzionale che riceve i `params` analizzati e restituisce un segnale di rifiuto. |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | Un callable opzionale che trasforma i `params` analizzati prima dell'invocazione del metodo. |
 
 ### Protocollo Validatore
 
@@ -43,10 +46,24 @@ Ogni validatore riceve i `params` analizzati e può restituire:
 
 | Valore di ritorno | Comportamento |
 |---|---|
-| `Some(JsonRpcError)` o `Some(Exception)` | Rifiuta con quell'errore wrappato in `InvalidParams` |
+| `Some(JsonRpcError)` | Rifiuta con quell'errore wrappato in `InvalidParams` |
+| `Some(Exception)` | Rifiuta con quell'errore wrappato in `InvalidParams` |
 | `False` | Rifiuta con un errore generico `InvalidParams` |
 | `Exception` o `JsonRpcError` | Rifiuta con quell'errore direttamente |
-| `True`, `None` o qualsiasi altro valore truthy | Accetta — prosegue con il validatore successivo o con l'invocazione del metodo |
+| `True`, `None` o qualsiasi altro valore truthy | Accetta — prosegue con la conversione o con l'invocazione del metodo |
+
+### Protocollo Convertitore
+
+Il convertitore riceve il payload `params` grezzo e può restituire:
+
+| Valore di ritorno | Comportamento |
+|---|---|
+| `Some(value)` | Usa `value` come argomento del metodo |
+| `Nothing()` | Rifiuta con `ConversionError` |
+| `Ok(value)` | Usa `value` come argomento del metodo |
+| `Err(reason)` | Rifiuta con `ConversionError`, allegando `reason` ai dati |
+| Qualsiasi altro valore | Usa il valore direttamente come argomento del metodo |
+| Solleva `Exception` | Rifiuta con `ConversionError`, allegando l'eccezione ai dati |
 
 ### Attributi
 
@@ -64,13 +81,13 @@ Restituisce un hash basato sul nome del metodo. Due wrapper con lo stesso nome h
 
 Confronta due wrapper per nome del metodo.
 
-#### `__call__(args: Option[Any]) -> Result[Any, JsonRpcError]`
+#### `__call__(params: Option[Any]) -> Result[Any, JsonRpcError]`
 
-Esegue il metodo wrappato con parametri opzionali. I validatori vengono eseguiti prima del metodo. Se un validatore rifiuta i parametri, la chiamata si interrompe con un `Err`.
+Esegue il metodo wrappato con parametri opzionali. I validatori vengono eseguiti prima del metodo, poi la conversione; se uno qualsiasi dei due passaggi rifiuta i parametri, la chiamata si interrompe con un `Err`.
 
 | Parametro | Tipo | Descrizione |
 |---|---|---|
-| `args` | `Option[Any]` | Un `Option` contenente i parametri del metodo. `Some` significa che i parametri sono stati forniti; `None` significa nessun parametro. |
+| `params` | `Option[Any]` | Un `Option` contenente i parametri del metodo. `Some` significa che i parametri sono stati forniti; `None` significa nessun parametro. |
 
 **Restituisce:** `Ok(result)` in caso di successo, oppure `Err(JsonRpcError)` in caso di errore.
 
@@ -186,10 +203,22 @@ Instrada i messaggi JSON-RPC in arrivo verso gli handler registrati. Mantiene re
 ### Costruttore
 
 ```python
-JsonRpcDispatcher()
+JsonRpcDispatcher(
+    response_handler: Callable[[JsonRpcResponse], None] | None = None,
+)
 ```
 
-Inizializza il dispatcher con registri di handler vuoti.
+| Parametro | Tipo | Predefinito | Descrizione |
+|---|---|---|---|
+| `response_handler` | `Callable[[JsonRpcResponse], None] \| None` | `None` | Callback opzionale invocata quando un `JsonRpcResponse` viene dispatchato direttamente. |
+
+### Attributi di Classe
+
+| Attributo | Tipo | Descrizione |
+|---|---|---|
+| `ERROR_CASE` | `JsonRpcResponseCtorWrapper.State` | Selettore esito per le risposte di errore. |
+| `RESULT_CASE` | `JsonRpcResponseCtorWrapper.State` | Selettore esito per i risultati di successo. |
+| `BOTH_CASES` | `JsonRpcResponseCtorWrapper._When` | Selettore esito che corrisponde a entrambi gli esiti. |
 
 ### Attributi
 
@@ -200,13 +229,57 @@ Inizializza il dispatcher con registri di handler vuoti.
 
 ### Metodi
 
-#### `__call__(data: str | JsonRpcRequest | JsonRpcNotification) -> Option[Result[JsonRpcResponse, JsonRpcError]]`
+#### `emplace_request_handler(*, name, method, validator=None, converter=None) -> bool`
+
+Registra un handler per le richieste in una singola chiamata. Funzione di comodo per `request_handler_registry.add(JsonRpcMethodWrapper(...))`.
+
+| Parametro | Tipo | Predefinito | Descrizione |
+|---|---|---|---|
+| `name` | `str` | *(obbligatorio)* | Il nome del metodo JSON-RPC. |
+| `method` | `Callable[..., Any]` | *(obbligatorio)* | Il callable da invocare quando dispatchato. |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | Validatore opzionale dei parametri. |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | Convertitore opzionale dei parametri. |
+
+**Restituisce:** `True` se registrato per la prima volta, `False` se il nome esisteva già.
+
+#### `emplace_notification_handler(*, name, method, validator=None, converter=None) -> bool`
+
+Registra un handler per le notifiche in una singola chiamata. Funzione di comodo per `notification_handler_registry.add(JsonRpcMethodWrapper(...))`.
+
+| Parametro | Tipo | Predefinito | Descrizione |
+|---|---|---|---|
+| `name` | `str` | *(obbligatorio)* | Il nome del metodo JSON-RPC. |
+| `method` | `Callable[..., Any]` | *(obbligatorio)* | Il callable da invocare quando dispatchato. |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | Validatore opzionale dei parametri. |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | Convertitore opzionale dei parametri. |
+
+**Restituisce:** `True` se registrato per la prima volta, `False` se il nome esisteva già.
+
+#### `emplace_custom_response_ctor(method, ctor, *states)`
+
+Registra un costruttore di risposte personalizzato per *method*.
+
+| Parametro | Tipo | Descrizione |
+|---|---|---|
+| `method` | `str` | Il nome del metodo JSON-RPC a cui il costruttore si applica. |
+| `ctor` | `Callable[..., JsonRpcResponse]` | Callable che costruisce un `JsonRpcResponse`. |
+| `*states` | `JsonRpcResponseCtorWrapper.State` | Membri di stato opzionali che limitano quando il *ctor* viene usato. |
+
+#### `add_custom_response_ctor(ctor: JsonRpcResponseCtorWrapper)`
+
+Registra un costruttore di risposte personalizzato pre-costruito. Sostituisce qualsiasi costruttore precedentemente registrato per lo stesso metodo.
+
+| Parametro | Tipo | Descrizione |
+|---|---|---|
+| `ctor` | `JsonRpcResponseCtorWrapper` | Il wrapper che lega un costruttore a un nome di metodo. |
+
+#### `__call__(data) -> Option[Result[JsonRpcResponse, JsonRpcError]]`
 
 Dispatcha un messaggio JSON-RPC.
 
 | Parametro | Tipo | Descrizione |
 |---|---|---|
-| `data` | `str \| JsonRpcRequest \| JsonRpcNotification` | Una stringa JSON, un `JsonRpcRequest` o un `JsonRpcNotification`. |
+| `data` | `str \| JsonRpcRequest \| JsonRpcNotification \| JsonRpcResponse \| Result[...]` | Una stringa JSON, un `JsonRpcRequest`, un `JsonRpcNotification`, un `JsonRpcResponse` o un `Result`. |
 
 **Restituisce:**
 
@@ -230,12 +303,58 @@ True
 3
 ```
 
-#### `try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]` *(classmethod)*
+#### `try_parse(data: str) -> Result[JsonRpcResponse | JsonRpcRequest | JsonRpcNotification, JsonRpcError]` *(classmethod)*
 
-Tenta di analizzare una stringa JSON in una richiesta o notifica. Prima prova con `JsonRpcRequest`; in caso di fallimento ricade su `JsonRpcNotification`.
+Tenta di analizzare una stringa JSON in una risposta, richiesta o notifica. Prima prova con `JsonRpcResponse`; in caso di fallimento ricade su `JsonRpcNotification`; in caso di fallimento ricade su `JsonRpcRequest`.
 
 | Parametro | Tipo | Descrizione |
 |---|---|---|
 | `data` | `str` | Una stringa codificata JSON. |
 
-**Restituisce:** `Ok(request | notification)` in caso di successo, oppure `Err(JsonRpcError)` in caso di errore di parsing.
+**Restituisce:** `Ok(response | notification | request)` in caso di successo, oppure `Err(JsonRpcError)` in caso di errore di parsing.
+
+---
+
+## `JsonRpcResponseCtorWrapper`
+
+```python
+class JsonRpcResponseCtorWrapper
+```
+
+Lega un costruttore personalizzato di `JsonRpcResponse` a un nome di metodo. Il wrapper registra *quando* il costruttore si applica — risultati di successo, errori o entrambi — in modo che il dispatcher possa scegliere il tipo di risposta giusto per ciascun esito.
+
+### Costruttore
+
+```python
+JsonRpcResponseCtorWrapper(
+    method: str,
+    ctor: Callable[..., JsonRpcResponse],
+    *states: JsonRpcResponseCtorWrapper.State,
+)
+```
+
+| Parametro | Tipo | Predefinito | Descrizione |
+|---|---|---|---|
+| `method` | `str` | *(obbligatorio)* | Il nome del metodo JSON-RPC a cui il costruttore si applica. |
+| `ctor` | `Callable[..., JsonRpcResponse]` | *(obbligatorio)* | Callable che riceve argomenti keyword (`id`, `result` o `error`, e `jsonrpc`) e restituisce un `JsonRpcResponse`. |
+| `*states` | `State` | Entrambi gli esiti | Membri `State` opzionali che limitano quando il *ctor* viene usato. |
+
+### Classe Interna: `State`
+
+```python
+class State(Enum)
+```
+
+Selettore esito che controlla quando un costruttore viene applicato.
+
+| Membro | Valore | Descrizione |
+|---|---|---|
+| `Result` | `1` | Il costruttore gestisce i risultati di successo. |
+| `Error` | `2` | Il costruttore gestisce le risposte di errore. |
+
+### Attributi
+
+| Attributo | Tipo | Descrizione |
+|---|---|---|
+| `method` | `str` | Il nome del metodo JSON-RPC a cui questo costruttore è legato. |
+| `when` | `_When` | Il selettore esito per questo costruttore. |

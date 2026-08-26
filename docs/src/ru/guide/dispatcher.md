@@ -7,6 +7,7 @@ from jrpc_core.dispatcher import (
     JsonRpcDispatcher,
     JsonRpcMethodWrapper,
     JsonRpcHandlerCollection,
+    JsonRpcResponseCtorWrapper,
 )
 ```
 
@@ -18,7 +19,7 @@ from jrpc_core.dispatcher import (
 class JsonRpcMethodWrapper
 ```
 
-Оборачивает вызываемый объект как метод JSON-RPC с необязательными валидаторами параметров.
+Оборачивает вызываемый объект как метод JSON-RPC с необязательными валидаторами и конвертерами параметров.
 
 ### Конструктор
 
@@ -27,7 +28,8 @@ JsonRpcMethodWrapper(
     *,
     name: str,
     method: Callable[..., Any],
-    validators: list[Callable[..., Option[JsonRpcError]]] | None = None,
+    validator: Callable[..., Option[JsonRpcError] | bool] | None = None,
+    converter: Callable[..., Option[Any] | Result[Any, Exception | JsonRpcError] | Any] | None = None,
 )
 ```
 
@@ -35,7 +37,8 @@ JsonRpcMethodWrapper(
 |---|---|---|---|
 | `name` | `str` | *(обязательный)* | Имя метода JSON-RPC. |
 | `method` | `Callable[..., Any]` | *(обязательный)* | Вызываемый объект, который выполняется при диспетчеризации этого метода. |
-| `validators` | `list[Callable[..., Option[JsonRpcError]]] \| None` | `None` | Необязательный список вызываемых объектов, которые получают распарсенные `params` и возвращают сигнал отклонения. |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | Необязательный вызываемый объект, который получает распарсенные `params` и возвращает сигнал отклонения. |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | Необязательный вызываемый объект, который преобразует распарсенные `params` перед вызовом метода. |
 
 ### Протокол валидатора
 
@@ -43,10 +46,24 @@ JsonRpcMethodWrapper(
 
 | Возвращаемое значение | Поведение |
 |---|---|
-| `Some(JsonRpcError)` или `Some(Exception)` | Отклоняет с ошибкой, обёрнутой в `InvalidParams` |
+| `Some(JsonRpcError)` | Отклоняет с этой ошибкой |
+| `Some(Exception)` | Отклоняет с ошибкой, обёрнутой в `InvalidParams` |
 | `False` | Отклоняет с общей ошибкой `InvalidParams` |
 | `Exception` или `JsonRpcError` | Отклоняет с этой ошибкой напрямую |
-| `True`, `None` или любое другое истинное значение | Принимает — переходит к следующему валидатору или вызову метода |
+| `True`, `None` или любое другое истинное значение | Принимает — переходит к конвертеру или вызову метода |
+
+### Протокол конвертера
+
+Конвертер получает исходные `params` и может вернуть:
+
+| Возвращаемое значение | Поведение |
+|---|---|
+| `Some(value)` | Использует `value` как аргумент метода |
+| `Nothing()` | Отклоняет с `ConversionError` |
+| `Ok(value)` | Использует `value` как аргумент метода |
+| `Err(reason)` | Отклоняет с `ConversionError`, прикрепляя `reason` к `data` |
+| Любое другое значение | Использует значение напрямую как аргумент метода |
+| Выбрасывает `Exception` | Отклоняет с `ConversionError`, прикрепляя исключение к `data` |
 
 ### Атрибуты
 
@@ -64,13 +81,13 @@ JsonRpcMethodWrapper(
 
 Сравнивает две обёртки по имени метода.
 
-#### `__call__(args: Option[Any]) -> Result[Any, JsonRpcError]`
+#### `__call__(params: Option[Any]) -> Result[Any, JsonRpcError]`
 
-Выполняет оборачиваемый метод с необязательными параметрами. Валидаторы запускаются перед методом. Если любой валидатор отклоняет параметры, вызов прерывается с `Err`.
+Выполняет оборачиваемый метод с необязательными параметрами. Валидация запускается первой, затем конвертация; если любой шаг отклоняет параметры, вызов прерывается с `Err`.
 
 | Параметр | Тип | Описание |
 |---|---|---|
-| `args` | `Option[Any]` | `Option`, содержащий параметры метода. `Some` означает, что параметры были предоставлены; `None` означает их отсутствие. |
+| `params` | `Option[Any]` | `Option`, содержащий параметры метода. `Some` означает, что параметры были предоставлены; `None` означает их отсутствие. |
 
 **Возвращает:** `Ok(result)` при успехе или `Err(JsonRpcError)` при сбое.
 
@@ -186,10 +203,22 @@ class JsonRpcDispatcher
 ### Конструктор
 
 ```python
-JsonRpcDispatcher()
+JsonRpcDispatcher(
+    response_handler: Callable[[JsonRpcResponse], None] | None = None,
+)
 ```
 
-Инициализирует диспетчер с пустыми реестрами обработчиков.
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `response_handler` | `Callable[[JsonRpcResponse], None] \| None` | `None` | Необязательный обратный вызов, вызываемый при прямой диспетчеризации `JsonRpcResponse`. |
+
+### Атрибуты класса
+
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `ERROR_CASE` | `JsonRpcResponseCtorWrapper.State` | Селектор результата для ответов с ошибками. |
+| `RESULT_CASE` | `JsonRpcResponseCtorWrapper.State` | Селектор результата для успешных ответов. |
+| `BOTH_CASES` | `JsonRpcResponseCtorWrapper._When` | Селектор результата, совпадающий с обоими исходами. |
 
 ### Атрибуты
 
@@ -200,13 +229,57 @@ JsonRpcDispatcher()
 
 ### Методы
 
-#### `__call__(data: str | JsonRpcRequest | JsonRpcNotification) -> Option[Result[JsonRpcResponse, JsonRpcError]]`
+#### `emplace_request_handler(*, name, method, validator=None, converter=None) -> bool`
+
+Регистрирует обработчик запросов за один вызов. Удобная замена `request_handler_registry.add(JsonRpcMethodWrapper(...))`.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `name` | `str` | *(обязательный)* | Имя метода JSON-RPC. |
+| `method` | `Callable[..., Any]` | *(обязательный)* | Вызываемый объект, который выполняется при диспетчеризации. |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | Необязательный валидатор параметров. |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | Необязательный конвертер параметров. |
+
+**Возвращает:** `True`, если метод был зарегистрирован впервые, `False`, если имя уже существовало.
+
+#### `emplace_notification_handler(*, name, method, validator=None, converter=None) -> bool`
+
+Регистрирует обработчик уведомлений за один вызов. Удобная замена `notification_handler_registry.add(JsonRpcMethodWrapper(...))`.
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `name` | `str` | *(обязательный)* | Имя метода JSON-RPC. |
+| `method` | `Callable[..., Any]` | *(обязательный)* | Вызываемый объект, который выполняется при диспетчеризации. |
+| `validator` | `Callable[..., Option[JsonRpcError] \| bool] \| None` | `None` | Необязательный валидатор параметров. |
+| `converter` | `Callable[..., Option[Any] \| Result[Any, Exception \| JsonRpcError] \| Any] \| None` | `None` | Необязательный конвертер параметров. |
+
+**Возвращает:** `True`, если метод был зарегистрирован впервые, `False`, если имя уже существовало.
+
+#### `emplace_custom_response_ctor(method, ctor, *states)`
+
+Регистрирует пользовательский конструктор ответа для *method*.
+
+| Параметр | Тип | Описание |
+|---|---|---|
+| `method` | `str` | Имя метода JSON-RPC, к которому применяется конструктор. |
+| `ctor` | `Callable[..., JsonRpcResponse]` | Вызываемый объект, создающий `JsonRpcResponse`. |
+| `*states` | `JsonRpcResponseCtorWrapper.State` | Необязательные члены State, ограничивающие применение *ctor*. |
+
+#### `add_custom_response_ctor(ctor: JsonRpcResponseCtorWrapper)`
+
+Регистрирует готовый пользовательский конструктор ответа. Заменяет любой ранее зарегистрированный конструктор для того же метода.
+
+| Параметр | Тип | Описание |
+|---|---|---|
+| `ctor` | `JsonRpcResponseCtorWrapper` | Обёртка, привязывающая конструктор к имени метода. |
+
+#### `__call__(data: str | JsonRpcRequest | JsonRpcNotification | JsonRpcResponse | Result[...]) -> Option[Result[JsonRpcResponse, JsonRpcError]]`
 
 Диспетчеризирует сообщение JSON-RPC.
 
 | Параметр | Тип | Описание |
 |---|---|---|
-| `data` | `str \| JsonRpcRequest \| JsonRpcNotification` | JSON-строка, `JsonRpcRequest` или `JsonRpcNotification`. |
+| `data` | `str \| JsonRpcRequest \| JsonRpcNotification \| JsonRpcResponse \| Result[...]` | JSON-строка, `JsonRpcRequest`, `JsonRpcNotification`, `JsonRpcResponse` или `Result`. |
 
 **Возвращает:**
 
@@ -230,12 +303,58 @@ True
 3
 ```
 
-#### `try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]` *(classmethod)*
+#### `try_parse(data: str) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]` *(classmethod)*
 
-Пытается распарсить JSON-строку как запрос или уведомление. Сначала пробует `JsonRpcRequest`; при неудаче переходит к `JsonRpcNotification`.
+Пытается распарсить JSON-строку как ответ, запрос или уведомление. Сначала пробует `JsonRpcResponse`; при неудаче переходит к `JsonRpcNotification`; при неудаче переходит к `JsonRpcRequest`.
 
 | Параметр | Тип | Описание |
 |---|---|---|
 | `data` | `str` | JSON-строка. |
 
-**Возвращает:** `Ok(request | notification)` при успехе или `Err(JsonRpcError)` при ошибке парсинга.
+**Возвращает:** `Ok(response | notification | request)` при успехе или `Err(JsonRpcError)` при ошибке парсинга.
+
+---
+
+## `JsonRpcResponseCtorWrapper`
+
+```python
+class JsonRpcResponseCtorWrapper
+```
+
+Привязывает пользовательский конструктор `JsonRpcResponse` к имени метода. Обёртка записывает, *когда* применяется конструктор — успешные результаты, ошибки или оба варианта — чтобы диспетчер мог выбрать правильный тип ответа для каждого исхода.
+
+### Конструктор
+
+```python
+JsonRpcResponseCtorWrapper(
+    method: str,
+    ctor: Callable[..., JsonRpcResponse],
+    *states: JsonRpcResponseCtorWrapper.State,
+)
+```
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `method` | `str` | *(обязательный)* | Имя метода JSON-RPC, к которому применяется этот конструктор. |
+| `ctor` | `Callable[..., JsonRpcResponse]` | *(обязательный)* | Вызываемый объект, принимающий ключевые аргументы (`id`, `result` или `error`, и `jsonrpc`) и возвращающий `JsonRpcResponse`. |
+| `*states` | `State` | Оба исхода | Необязательные члены `State`, ограничивающие применение *ctor*. |
+
+### Внутренний класс: `State`
+
+```python
+class State(Enum)
+```
+
+Селектор результата, определяющий, когда применяется конструктор.
+
+| Член | Значение | Описание |
+|---|---|---|
+| `Result` | `1` | Конструктор обрабатывает успешные результаты. |
+| `Error` | `2` | Конструктор обрабатывает ответы с ошибками. |
+
+### Атрибуты
+
+| Атрибут | Тип | Описание |
+|---|---|---|
+| `method` | `str` | Имя метода JSON-RPC, к которому привязан этот конструктор. |
+| `when` | `_When` | Селектор результата для этого конструктора. |

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -14,6 +15,8 @@ from jrpc_core.dispatcher import (
     JsonRpcDispatcher,
     JsonRpcHandlerCollection,
     JsonRpcMethodWrapper,
+    JsonRpcResponseCtorWrapper,
+    _AsyncWrapper,
 )
 from jrpc_core.messages import (
     JsonRpcError,
@@ -30,15 +33,21 @@ from jrpc_core.messages import (
 
 
 class TestJsonRpcMethodWrapper:
-    def test_init_without_validators(self):
+    def test_init_without_validator_and_converter(self):
         w = JsonRpcMethodWrapper(name="m", method=lambda x: x)
         assert w.name == "m"
-        assert w._validators == []
+        assert w._validator is None
+        assert w._converter is None
 
-    def test_init_with_validators(self):
+    def test_init_with_validator(self):
         v = lambda args: True
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[v])
-        assert w._validators == [v]
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=v)
+        assert w._validator is v
+
+    def test_init_with_converter(self):
+        c = lambda args: args
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, converter=c)
+        assert w._converter is c
 
     def test_name_property(self):
         w = JsonRpcMethodWrapper(name="hello", method=lambda: None)
@@ -87,8 +96,8 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return Some(JsonRpcError(code=JsonRpcErrorCode.InvalidParams, message="nope"))
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
-        result = w(Some([1, 2]))
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
+        result = asyncio.run(w(Some([1, 2])))
         assert result.is_err()
         assert result.unwrap_err().message == "nope"
 
@@ -96,8 +105,8 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return False
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
-        result = w(Some([1, 2]))
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
+        result = asyncio.run(w(Some([1, 2])))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.InvalidParams
 
@@ -105,8 +114,8 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return RuntimeError("bad params")
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
-        result = w(Some([1, 2]))
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
+        result = asyncio.run(w(Some([1, 2])))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.InternalError
 
@@ -114,8 +123,8 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return JsonRpcErrorCode.MethodNotFound.into()
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validators=[validator])
-        result = w(Some([1, 2]))
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=validator)
+        result = asyncio.run(w(Some([1, 2])))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.MethodNotFound
 
@@ -123,14 +132,96 @@ class TestJsonRpcMethodWrapper:
         def validator(args):
             return True
 
-        w = JsonRpcMethodWrapper(name="m", method=lambda x: sum(x), validators=[validator])
-        result = w(Some([1, 2, 3]))
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: sum(x), validator=validator)
+        result = asyncio.run(w(Some([1, 2, 3])))
         assert result.is_ok()
         assert result.unwrap() == 6
 
+    def test_call_no_converter_passthrough(self):
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x[0] + x[1])
+        result = asyncio.run(w(Some([1, 2])))
+        assert result.is_ok()
+        assert result.unwrap() == 3
+
+    def test_call_converter_raw_value(self):
+        w = JsonRpcMethodWrapper(
+            name="m",
+            method=lambda name: f"hello {name}",
+            converter=lambda p: p["name"],
+        )
+        result = asyncio.run(w(Some({"name": "Ada"})))
+        assert result.is_ok()
+        assert result.unwrap() == "hello Ada"
+
+    def test_call_converter_option_some(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x * 2, converter=lambda p: Some(p)
+        )
+        result = asyncio.run(w(Some(21)))
+        assert result.is_ok()
+        assert result.unwrap() == 42
+
+    def test_call_converter_option_nothing_rejected(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x, converter=lambda p: Nothing()
+        )
+        result = asyncio.run(w(Some([1])))
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.code is JsonRpcErrorCode.ConversionError
+
+    def test_call_converter_result_ok(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x + 1, converter=lambda p: Ok(p)
+        )
+        result = asyncio.run(w(Some(41)))
+        assert result.is_ok()
+        assert result.unwrap() == 42
+
+    def test_call_converter_result_err_rejected(self):
+        w = JsonRpcMethodWrapper(
+            name="m", method=lambda x: x, converter=lambda p: Err("bad shape")
+        )
+        result = asyncio.run(w(Some([1])))
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.code is JsonRpcErrorCode.ConversionError
+        assert err.data == "bad shape"
+
+    def test_call_converter_raises_rejected(self):
+        def bad_converter(params):
+            raise ValueError("nope")
+
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, converter=bad_converter)
+        result = asyncio.run(w(Some([1])))
+        assert result.is_err()
+        err = result.unwrap_err()
+        assert err.code is JsonRpcErrorCode.ConversionError
+        assert isinstance(err.data, ValueError)
+
+    def test_validation_runs_before_conversion(self):
+        calls = []
+
+        def validator(args):
+            calls.append("validate")
+            return True
+
+        def converter(args):
+            calls.append("convert")
+            return args
+
+        def method(args):
+            calls.append("call")
+
+        w = JsonRpcMethodWrapper(
+            name="m", method=method, validator=validator, converter=converter
+        )
+        asyncio.run(w(Some([1])))
+        assert calls == ["validate", "convert", "call"]
+
     def test_call_with_args_method_success(self):
         w = JsonRpcMethodWrapper(name="m", method=lambda x: x[0] + x[1])
-        result = w(Some([10, 20]))
+        result = asyncio.run(w(Some([10, 20])))
         assert result.is_ok()
         assert result.unwrap() == 30
 
@@ -139,13 +230,13 @@ class TestJsonRpcMethodWrapper:
             raise ValueError("boom")
 
         w = JsonRpcMethodWrapper(name="m", method=bad_method)
-        result = w(Some([1]))
+        result = asyncio.run(w(Some([1])))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.ExecutionError
 
     def test_call_no_args_method_success(self):
         w = JsonRpcMethodWrapper(name="m", method=lambda: 42)
-        result = w(Nothing())
+        result = asyncio.run(w(Nothing()))
         assert result.is_ok()
         assert result.unwrap() == 42
 
@@ -154,7 +245,7 @@ class TestJsonRpcMethodWrapper:
             raise RuntimeError("boom")
 
         w = JsonRpcMethodWrapper(name="m", method=bad_method)
-        result = w(Nothing())
+        result = asyncio.run(w(Nothing()))
         assert result.is_err()
         assert result.unwrap_err().code is JsonRpcErrorCode.ExecutionError
 
@@ -233,6 +324,97 @@ class TestJsonRpcHandlerCollection:
 
 
 # ---------------------------------------------------------------------------
+# JsonRpcResponseCtorWrapper
+# ---------------------------------------------------------------------------
+
+
+class TestJsonRpcResponseCtorWrapperState:
+    def test_is_result(self):
+        state = JsonRpcResponseCtorWrapper.State.Result
+        assert state.is_result() is True
+        assert state.is_error() is False
+
+    def test_is_error(self):
+        state = JsonRpcResponseCtorWrapper.State.Error
+        assert state.is_error() is True
+        assert state.is_result() is False
+
+    def test_int_conversion(self):
+        assert int(JsonRpcResponseCtorWrapper.State.Result) == 1
+        assert int(JsonRpcResponseCtorWrapper.State.Error) == 2
+
+
+class TestJsonRpcResponseCtorWrapperWhen:
+    W = JsonRpcResponseCtorWrapper
+    S = JsonRpcResponseCtorWrapper.State
+
+    def test_for_result_matches_only_result(self):
+        when = self.W._When.for_result()
+        assert when == self.S.Result
+        assert not when == self.S.Error
+
+    def test_for_error_matches_only_error(self):
+        when = self.W._When.for_error()
+        assert when == self.S.Error
+        assert not when == self.S.Result
+
+    def test_for_both_cases_matches_both(self):
+        when = self.W._When.for_both_cases()
+        assert when == self.S.Result
+        assert when == self.S.Error
+
+    def test_eq_same_code(self):
+        assert self.W._When.for_result() == self.W._When.for_result()
+        assert self.W._When.for_result() != self.W._When.for_error()
+
+    def test_hash_equal_for_same_code(self):
+        assert hash(self.W._When.for_result()) == hash(self.W._When.for_result())
+
+    def test_str(self):
+        assert str(self.W._When.for_result()) == "for result"
+        assert str(self.W._When.for_error()) == "for error"
+        assert str(self.W._When.for_both_cases()) == "for both cases"
+
+    def test_repr_equals_str(self):
+        when = self.W._When.for_both_cases()
+        assert repr(when) == str(when)
+
+    def test_int_returns_bitmask(self):
+        assert int(self.W._When.for_result()) == 1
+        assert int(self.W._When.for_error()) == 2
+        assert int(self.W._When.for_both_cases()) == 3
+
+
+class TestJsonRpcResponseCtorWrapper:
+    def test_default_when_is_both_cases(self):
+        w = JsonRpcResponseCtorWrapper("m", JsonRpcResponse)
+        assert w.when == JsonRpcResponseCtorWrapper.State.Result
+        assert w.when == JsonRpcResponseCtorWrapper.State.Error
+
+    def test_explicit_states_restrict_when(self):
+        w = JsonRpcResponseCtorWrapper(
+            "m", JsonRpcResponse, JsonRpcResponseCtorWrapper.State.Error
+        )
+        assert w.when == JsonRpcResponseCtorWrapper.State.Error
+        assert not w.when == JsonRpcResponseCtorWrapper.State.Result
+
+    def test_method_property(self):
+        w = JsonRpcResponseCtorWrapper("m", JsonRpcResponse)
+        assert w.method == "m"
+
+    def test_call_delegates_to_ctor(self):
+        captured = {}
+
+        def ctor(**kwargs):
+            captured.update(kwargs)
+            return "built"
+
+        w = JsonRpcResponseCtorWrapper("m", ctor)
+        assert w(id=1, result="x") == "built"
+        assert captured == {"id": 1, "result": "x"}
+
+
+# ---------------------------------------------------------------------------
 # JsonRpcDispatcher
 # ---------------------------------------------------------------------------
 
@@ -257,7 +439,7 @@ class TestJsonRpcDispatcher:
             JsonRpcMethodWrapper(name="add", method=lambda args: args[0] + args[1])
         )
         req = JsonRpcRequest(method="add", params=[1, 2], id=1)
-        result = d(req)
+        result = asyncio.run(d(req))
         assert result.is_some()
         resp = result.unwrap()
         assert resp.is_ok()
@@ -266,7 +448,7 @@ class TestJsonRpcDispatcher:
     def test_call_with_request_handler_not_found(self):
         d = JsonRpcDispatcher()
         req = JsonRpcRequest(method="missing", id=1)
-        result = d(req)
+        result = asyncio.run(d(req))
         assert result.is_some()
         resp = result.unwrap()
         assert resp.is_ok()
@@ -283,14 +465,14 @@ class TestJsonRpcDispatcher:
             JsonRpcMethodWrapper(name="evt", method=handler)
         )
         notif = JsonRpcNotification(method="evt", params=[1, 2])
-        result = d(notif)
+        result = asyncio.run(d(notif))
         assert not result.is_some()
         assert called == [[1, 2]]
 
     def test_call_with_notification_handler_not_found(self):
         d = JsonRpcDispatcher()
         notif = JsonRpcNotification(method="missing")
-        result = d(notif)
+        result = asyncio.run(d(notif))
         assert result.is_some()
         assert result.unwrap().is_err()
         assert result.unwrap().unwrap_err().code is JsonRpcErrorCode.MethodNotFound
@@ -301,7 +483,7 @@ class TestJsonRpcDispatcher:
             JsonRpcMethodWrapper(name="add", method=lambda args: sum(args))
         )
         raw = json.dumps({"jsonrpc": "2.0", "method": "add", "params": [1, 2, 3], "id": 1})
-        result = d(raw)
+        result = asyncio.run(d(raw))
         assert result.is_some()
         resp = result.unwrap()
         assert resp.is_ok()
@@ -309,7 +491,7 @@ class TestJsonRpcDispatcher:
 
     def test_call_with_string_parse_failure(self):
         d = JsonRpcDispatcher()
-        result = d("not json")
+        result = asyncio.run(d("not json"))
         assert result.is_some()
         resp = result.unwrap()
         assert resp.is_err()
@@ -317,7 +499,7 @@ class TestJsonRpcDispatcher:
 
     def test_call_with_unknown_type(self):
         d = JsonRpcDispatcher()
-        result = d(42)
+        result = asyncio.run(d(42))
         assert result.is_some()
         resp = result.unwrap()
         assert resp.is_err()
@@ -352,12 +534,212 @@ class TestJsonRpcDispatcher:
 
     def test_dispatch_string_notification(self):
         d = JsonRpcDispatcher()
-        d.request_handler_registry.add(
+        d.notification_handler_registry.add(
             JsonRpcMethodWrapper(name="evt", method=lambda args: None)
         )
         raw = json.dumps({"jsonrpc": "2.0", "method": "evt", "params": [1]})
-        result = d(raw)
+        result = asyncio.run(d(raw))
+        assert not result.is_some()
+
+    def test_emplace_request_handler_registers(self):
+        d = JsonRpcDispatcher()
+        assert d.emplace_request_handler(name="add", method=lambda a, b: a + b) is True
+        assert d.request_handler_registry.exists("add") is True
+        assert d.emplace_request_handler(name="add", method=lambda x: x) is False
+
+    def test_emplace_request_handler_with_validator_and_converter(self):
+        d = JsonRpcDispatcher()
+        d.emplace_request_handler(
+            name="greet",
+            method=lambda name: f"hi {name}",
+            validator=lambda p: isinstance(p, dict),
+            converter=lambda p: p["name"],
+        )
+        req = JsonRpcRequest(method="greet", params={"name": "Ada"}, id=1)
+        resp = asyncio.run(d(req)).unwrap().unwrap()
+        assert resp.result == "hi Ada"
+
+    def test_emplace_notification_handler_registers(self):
+        d = JsonRpcDispatcher()
+        assert (
+            d.emplace_notification_handler(name="evt", method=lambda args: None) is True
+        )
+        assert d.notification_handler_registry.exists("evt") is True
+        assert d.emplace_notification_handler(name="evt", method=lambda args: None) is False
+
+    def test_custom_response_ctor_used_on_success(self):
+        captured = {}
+
+        def ctor(**kwargs):
+            captured.update(kwargs)
+            return JsonRpcResponse(id=kwargs["id"], result="custom")
+
+        d = JsonRpcDispatcher()
+        d.emplace_custom_response_ctor("add", ctor)
+        d.emplace_request_handler(name="add", method=lambda args: args[0] + args[1])
+        resp = asyncio.run(d(JsonRpcRequest(method="add", params=[1, 2], id=9))).unwrap().unwrap()
+        assert resp.result == "custom"
+        assert captured["id"] == 9
+        assert captured["result"] == 3
+
+    def test_add_custom_response_ctor_used_on_success(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], result="wrapped")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(JsonRpcResponseCtorWrapper("m", ctor))
+        d.emplace_request_handler(name="m", method=lambda args: 42)
+        resp = asyncio.run(d(JsonRpcRequest(method="m", params=[1], id=8))).unwrap().unwrap()
+        assert resp.result == "wrapped"
+
+    def test_error_case_ctor_used_on_error(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], error=kwargs["error"])
+
+        def boom(args):
+            raise RuntimeError("boom")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(
+            JsonRpcResponseCtorWrapper("fail", ctor, JsonRpcDispatcher.ERROR_CASE)
+        )
+        d.emplace_request_handler(name="fail", method=boom)
+        resp = asyncio.run(d(JsonRpcRequest(method="fail", params=[1], id=5))).unwrap().unwrap()
+        assert resp.error is not None
+        assert resp.error.code is JsonRpcErrorCode.ExecutionError
+        assert isinstance(resp.error.data, RuntimeError)
+
+    def test_result_case_ctor_ignored_on_error(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], result="should not happen")
+
+        def boom(args):
+            raise RuntimeError("boom")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(
+            JsonRpcResponseCtorWrapper("m", ctor, JsonRpcDispatcher.RESULT_CASE)
+        )
+        d.emplace_request_handler(name="m", method=boom)
+        resp = asyncio.run(d(JsonRpcRequest(method="m", params=[1], id=6))).unwrap().unwrap()
+        assert resp.error is not None
+        assert resp.error.code is JsonRpcErrorCode.ExecutionError
+
+    def test_error_case_ctor_ignored_on_success(self):
+        def ctor(**kwargs):
+            return JsonRpcResponse(id=kwargs["id"], result="should not happen")
+
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(
+            JsonRpcResponseCtorWrapper("m", ctor, JsonRpcDispatcher.ERROR_CASE)
+        )
+        d.emplace_request_handler(name="m", method=lambda args: 42)
+        resp = asyncio.run(d(JsonRpcRequest(method="m", params=[1], id=7))).unwrap().unwrap()
+        assert resp.result == 42
+
+    def test_add_custom_response_ctor_replaces_existing(self):
+        first = JsonRpcResponseCtorWrapper(
+            "m", lambda **kw: JsonRpcResponse(id=kw["id"])
+        )
+        second = JsonRpcResponseCtorWrapper(
+            "m", lambda **kw: JsonRpcResponse(id=kw["id"])
+        )
+        d = JsonRpcDispatcher()
+        d.add_custom_response_ctor(first)
+        d.add_custom_response_ctor(second)
+        when, ctor = d._registry["m"]
+        assert ctor is second
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncWrapper:
+    def test_try_wrap_callable(self):
+        result = _AsyncWrapper.try_wrap(lambda: None)
         assert result.is_some()
-        resp = result.unwrap()
-        assert resp.is_ok()
-        assert resp.unwrap().result is None
+
+    def test_try_wrap_non_callable(self):
+        result = _AsyncWrapper.try_wrap(42)
+        assert not result.is_some()
+
+    def test_wrap_sync_function(self):
+        wrapped = _AsyncWrapper.wrap(lambda: 42)
+        assert isinstance(wrapped, _AsyncWrapper)
+        assert asyncio.run(wrapped()) == 42
+
+
+class TestValidatorRaisesException:
+    def test_validator_exception_in_validate(self):
+        def bad_validator(args):
+            raise RuntimeError("validator crashed")
+
+        w = JsonRpcMethodWrapper(name="m", method=lambda x: x, validator=bad_validator)
+        result = asyncio.run(w(Some([1])))
+        assert result.is_err()
+        assert result.unwrap_err().code is JsonRpcErrorCode.InternalError
+
+
+class TestMethodReturnsNonJrpcErr:
+    def test_no_args_returns_err(self):
+        def method():
+            return Err("raw error")
+
+        w = JsonRpcMethodWrapper(name="m", method=method)
+        result = asyncio.run(w(Nothing()))
+        assert result.is_err()
+        assert result.unwrap_err().code is JsonRpcErrorCode.ExecutionError
+        assert result.unwrap_err().data == "raw error"
+
+    def test_with_args_returns_err(self):
+        def method(args):
+            return Err("raw error")
+
+        w = JsonRpcMethodWrapper(name="m", method=method)
+        result = asyncio.run(w(Some([1])))
+        assert result.is_err()
+        assert result.unwrap_err().code is JsonRpcErrorCode.ExecutionError
+        assert result.unwrap_err().data == "raw error"
+
+
+class TestDispatcherResponseHandler:
+    def test_call_with_response_handler(self):
+        handled = []
+
+        def handler(resp):
+            handled.append(resp)
+
+        d = JsonRpcDispatcher(response_handler=handler)
+        resp = JsonRpcResponse(id=1, result="ok")
+        result = asyncio.run(d(resp))
+        assert not result.is_some()
+        assert len(handled) == 1
+        assert handled[0].result == "ok"
+
+    def test_call_with_response_handler_not_set(self):
+        d = JsonRpcDispatcher()
+        resp = JsonRpcResponse(id=1, result="ok")
+        result = asyncio.run(d(resp))
+        assert result.is_some()
+        assert result.unwrap().is_err()
+
+
+class TestDispatcherResultErr:
+    def test_call_with_result_err(self):
+        d = JsonRpcDispatcher()
+        err = JsonRpcError(code=JsonRpcErrorCode.InternalError, message="fail")
+        result = asyncio.run(d(Result(error=err)))
+        assert result.is_some()
+        inner = result.unwrap()
+        assert isinstance(inner, JsonRpcError)
+        assert inner.code is JsonRpcErrorCode.InternalError
+
+    def test_call_with_result_ok(self):
+        d = JsonRpcDispatcher()
+        d.emplace_request_handler(name="m", method=lambda args: 42)
+        result = asyncio.run(d(Result(value=JsonRpcRequest(method="m", params=[1], id=1))))
+        assert result.is_some()
+        assert result.unwrap().is_ok()
+        assert result.unwrap().unwrap().result == 42

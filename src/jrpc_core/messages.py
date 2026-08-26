@@ -9,9 +9,22 @@ validating, and serialising JSON-RPC 2.0 messages as defined in
 
 Typical usage::
 
-    from jrpc_core.messages import JsonRpcRequest, JsonRpcResponse
+    from jrpc_core import try_parse, JsonRpcRequest, JsonRpcResponse
 
+    # Parse incoming JSON-RPC message
+    def handle_server_data(data: str):
+        res = try_parse(data)
+        if res.is_ok():
+            message = res.unwrap()
+            # message is JsonRpcRequest | JsonRpcNotification | JsonRpcResponse
+
+    # Create and serialize a request
     request = JsonRpcRequest(method="add", params=[1, 2])
+    data: str = request.to_json()
+    # or
+    # data: str = request.serialize()
+
+    # Convert request to response
     response = request.into(Result.ok(3))
     print(response.to_json())
 """
@@ -23,8 +36,8 @@ from enum import Enum, StrEnum
 from typing import Any, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, field_validator, model_validator
-from pyfplib import Nothing, Option, Result, Some
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pyfplib import Option, Result
 
 JsonRpcId = str | int | float | None
 """Type alias for a JSON-RPC message identifier.
@@ -39,6 +52,10 @@ JsonRpcParams = dict[str, Any] | list[Any] | None
 Parameters may be a named mapping (``dict``), a positional list (``list``),
 or ``None`` when omitted.
 """
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class JsonRpcErrorCode(Enum):
@@ -66,6 +83,9 @@ class JsonRpcErrorCode(Enum):
     ExecutionError = -32000
     """A server-defined execution error occurred."""
 
+    ConversionError = -32001
+    """A server-defined conversion error occurred."""
+
     def __int__(self) -> int:
         """Return the integer value of this error code."""
         return self.value
@@ -86,9 +106,11 @@ class JsonRpcErrorCode(Enum):
             return "Method not found"
         elif self == JsonRpcErrorCode.InvalidRequest:
             return "Invalid Request"
-        else:
-            # elif self == JsonRpcErrorCode.ExecutionError:
+        elif self == JsonRpcErrorCode.ExecutionError:
             return "Execution error"
+        else:
+            # ConversionError is the only remaining member.
+            return "Data conversion error"
 
     @staticmethod
     def default() -> JsonRpcErrorCode:
@@ -121,7 +143,7 @@ class JsonRpcVersion(StrEnum):
     """JSON-RPC 2.0 (default)."""
 
 
-class JsonRpcError(BaseModel):
+class JsonRpcError(_StrictModel):
     """A JSON-RPC 2.0 error object.
 
     Attributes:
@@ -144,6 +166,15 @@ class JsonRpcError(BaseModel):
         return JsonRpcError(code=JsonRpcErrorCode.default())
 
     @staticmethod
+    def from_data(
+        *,
+        data: Any,
+        code: JsonRpcErrorCode = JsonRpcErrorCode.InternalError,
+        message: str = JsonRpcErrorCode.InternalError.description(),
+    ) -> JsonRpcError:
+        return JsonRpcError(code=code, message=message, data=data)
+
+    @staticmethod
     def from_error(error: JsonRpcError | Any) -> JsonRpcError:
         """Convert an arbitrary value into a :class:`JsonRpcError`.
 
@@ -161,20 +192,28 @@ class JsonRpcError(BaseModel):
         if isinstance(error, JsonRpcError):
             return error
         else:
-            maybe_code: Option[int] = Result.try_call(
-                getattr, cast(Any, error), "code"
+            maybe_code: Option[int | JsonRpcErrorCode] = cast(
+                Option[int | JsonRpcErrorCode],
+                Result.try_call(getattr, cast(Any, error), "code").ok(),
+            )
+            maybe_message: Option[str] = Result.try_call(
+                getattr, cast(error, Any), "message"
             ).ok()
-            code = (
-                int(maybe_code.unwrap())
-                if maybe_code.is_some()
-                else JsonRpcErrorCode.InternalError
-            )
-            message = (
-                code.description()
-                if isinstance(code, JsonRpcErrorCode)
-                else "Unknown error"
-            )
-            return JsonRpcError(code=code, message=message, data=error)
+            maybe_data: Option[str] = Result.try_call(
+                getattr, cast(error, Any), "data"
+            ).ok()
+            if maybe_code.is_some():
+                code = int(maybe_code.unwrap())
+                message = (
+                    maybe_message.unwrap()
+                    if maybe_message.is_some()
+                    else JsonRpcErrorCode.InternalError.description()
+                )
+                data = maybe_data.unwrap_or(None)
+                return JsonRpcError(code=code, message=message, data=data)
+            else:
+                code = JsonRpcErrorCode.InternalError
+                return JsonRpcError(code=code, message=code.description(), data=error)
 
     @staticmethod
     def try_from(value: Option[JsonRpcError | Any]) -> Option[JsonRpcError]:
@@ -189,7 +228,7 @@ class JsonRpcError(BaseModel):
         return value.map(lambda err: JsonRpcError.from_error(err))
 
 
-class JsonRpcRequest(BaseModel):
+class JsonRpcRequest(_StrictModel):
     """A JSON-RPC 2.0 request object.
 
     A request contains a ``method`` name, an optional ``params`` payload, and
@@ -203,7 +242,7 @@ class JsonRpcRequest(BaseModel):
     """
 
     method: str
-    id: JsonRpcId = str(uuid4())
+    id: JsonRpcId = Field(default_factory=lambda: str(uuid4()))
     params: JsonRpcParams = None
     jsonrpc: JsonRpcVersion = JsonRpcVersion.Version2
 
@@ -236,7 +275,7 @@ class JsonRpcRequest(BaseModel):
         Returns:
             ``Ok(request)`` on success, or ``Err(exception)`` on parse/validation failure.
         """
-        return Result.try_call(cls.model_validate_json, data)
+        return Result.try_call(cls.model_validate_json, data, strict=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the request to a plain dictionary.
@@ -259,6 +298,16 @@ class JsonRpcRequest(BaseModel):
         """
         return json.dumps(self.to_dict())
 
+    def serialize(self) -> str:
+        """Serialize the request to a JSON string.
+
+        Alias for :meth:`to_json`.
+
+        Returns:
+            A compact JSON representation of this request.
+        """
+        return self.to_json()
+
     def into(self, result: Result[Any, JsonRpcError]) -> JsonRpcResponse:
         """Create a :class:`JsonRpcResponse` from a handler result.
 
@@ -280,7 +329,7 @@ class JsonRpcRequest(BaseModel):
             return JsonRpcResponse.from_jrpc_result(self.id, result)
 
 
-class JsonRpcNotification(BaseModel):
+class JsonRpcNotification(_StrictModel):
     """A JSON-RPC 2.0 notification object.
 
     A notification is identical to a request but omits the ``id`` field,
@@ -334,7 +383,7 @@ class JsonRpcNotification(BaseModel):
         Returns:
             ``Ok(notification)`` on success, or ``Err(exception)`` on parse/validation failure.
         """
-        return Result.try_call(cls.model_validate_json, data)
+        return Result.try_call(cls.model_validate_json, data, strict=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the notification to a plain dictionary.
@@ -357,8 +406,18 @@ class JsonRpcNotification(BaseModel):
         """
         return json.dumps(self.to_dict())
 
+    def serialize(self) -> str:
+        """Serialize the notification to a JSON string.
 
-class JsonRpcResponse(BaseModel):
+        Alias for :meth:`to_json`.
+
+        Returns:
+            A compact JSON representation of this notification.
+        """
+        return self.to_json()
+
+
+class JsonRpcResponse(_StrictModel):
     """A JSON-RPC 2.0 response object.
 
     Exactly one of ``result`` or ``error`` must be set.  The ``id`` matches
@@ -412,7 +471,9 @@ class JsonRpcResponse(BaseModel):
         )
 
     @staticmethod
-    def from_jrpc_error(id: JsonRpcId, error: JsonRpcError) -> JsonRpcResponse:
+    def from_jrpc_error(
+        id: JsonRpcId, error: JsonRpcError | Exception
+    ) -> JsonRpcResponse:
         """Build an error response.
 
         Args:
@@ -422,7 +483,7 @@ class JsonRpcResponse(BaseModel):
         Returns:
             A :class:`JsonRpcResponse` with only ``error`` set.
         """
-        return JsonRpcResponse(id=id, error=error)
+        return JsonRpcResponse(id=id, error=JsonRpcError.from_error(error))
 
     @staticmethod
     def from_jrpc_result(id: JsonRpcId, result: Any) -> JsonRpcResponse:
@@ -459,7 +520,7 @@ class JsonRpcResponse(BaseModel):
         Returns:
             ``Ok(response)`` on success, or ``Err(exception)`` on parse/validation failure.
         """
-        return Result.try_call(JsonRpcResponse.model_validate_json, data)
+        return Result.try_call(JsonRpcResponse.model_validate_json, data, strict=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the response to a plain dictionary.
@@ -489,30 +550,38 @@ class JsonRpcResponse(BaseModel):
         """
         return json.dumps(self.to_dict())
 
+    def serialize(self) -> str:
+        """Serialize the response to a JSON string.
 
-def try_parse(data: str) -> Result[JsonRpcRequest | JsonRpcNotification, JsonRpcError]:
+        Alias for :meth:`to_json`.
+
+        Returns:
+            A compact JSON representation of this response.
+        """
+        return self.to_json()
+
+
+def try_parse(
+    data: str,
+) -> Result[JsonRpcResponse | JsonRpcNotification | JsonRpcRequest, JsonRpcError]:
     """Attempt to parse a JSON string as a JSON-RPC message.
 
-    The function first tries to parse as a :class:`JsonRpcRequest`; if that
-    fails it falls back to :class:`JsonRpcNotification`.  If both fail, the
+    The function first tries to parse as a :class:`JsonRpcResponse`; if that
+    fails it falls back to :class:`JsonRpcNotification`; if that
+    fails it falls back to :class:`JsonRpcRequest`.  If all of them fail, the
     parse error from the request attempt is returned.
-
-    .. note::
-
-       Because :class:`JsonRpcRequest` defaults ``id`` via ``uuid4()``,
-       a notification payload (no ``id``) will succeed as a request.  Use
-       :meth:`JsonRpcNotification.try_from_json` directly when you need to
-       enforce the notification form.
 
     Args:
         data: A JSON-encoded string.
 
     Returns:
-        ``Ok(request | notification)`` on success, or ``Err(JsonRpcError)``
+        ``Ok(request | notification | response)`` on success, or ``Err(JsonRpcError)``
         containing the parse failure.
     """
     return (
-        Result.try_call(JsonRpcRequest.try_from_json, data)
-        .map_err(lambda _: Result.try_call(JsonRpcNotification.try_from_json, data))
+        JsonRpcResponse.try_from_json(data)
+        .map_err(lambda _: JsonRpcNotification.try_from_json(data))
+        .flatten()
+        .map_err(lambda _: JsonRpcRequest.try_from_json(data))
         .flatten()
     )

@@ -9,20 +9,22 @@ validating, and serialising JSON-RPC 2.0 messages as defined in
 
 Typical usage::
 
-    # Server code
     from jrpc_core import try_parse, JsonRpcRequest, JsonRpcResponse
 
+    # Parse incoming JSON-RPC message
     def handle_server_data(data: str):
         res = try_parse(data)
+        if res.is_ok():
+            message = res.unwrap()
+            # message is JsonRpcRequest | JsonRpcNotification | JsonRpcResponse
 
-
-
-
+    # Create and serialize a request
     request = JsonRpcRequest(method="add", params=[1, 2])
     data: str = request.to_json()
-    // or
-    // data: str = request.serialize()
-    JsonRpc
+    # or
+    # data: str = request.serialize()
+
+    # Convert request to response
     response = request.into(Result.ok(3))
     print(response.to_json())
 """
@@ -196,11 +198,17 @@ class JsonRpcError(_StrictModel):
             )
             maybe_message: Option[str] = Result.try_call(
                 getattr, cast(error, Any), "message"
-            )
-            maybe_data: Option[str] = Result.try_call(getattr, cast(error, Any), "data")
-            if maybe_code.is_some() and maybe_message.is_some():
+            ).ok()
+            maybe_data: Option[str] = Result.try_call(
+                getattr, cast(error, Any), "data"
+            ).ok()
+            if maybe_code.is_some():
                 code = int(maybe_code.unwrap())
-                message = maybe_message.unwrap()
+                message = (
+                    maybe_message.unwrap()
+                    if maybe_message.is_some()
+                    else JsonRpcErrorCode.InternalError.description()
+                )
                 data = maybe_data.unwrap_or(None)
                 return JsonRpcError(code=code, message=message, data=data)
             else:

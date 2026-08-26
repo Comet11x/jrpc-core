@@ -190,11 +190,17 @@ class JsonRpcError(_StrictModel):
                 if maybe_code.is_some()
                 else JsonRpcErrorCode.InternalError
             )
-            message = (
-                code.description()
-                if isinstance(code, JsonRpcErrorCode)
-                else "Unknown error"
+            maybe_message: Option[str] = Result.try_call(
+                getattr, cast(error, Any), "message"
             )
+            if maybe_message.is_some():
+                message = maybe_message.unwrap()
+            else:
+                message = (
+                    code.description()
+                    if isinstance(code, JsonRpcErrorCode)
+                    else "Unknown error"
+                )
             return JsonRpcError(code=code, message=message, data=error)
 
     @staticmethod
@@ -453,7 +459,9 @@ class JsonRpcResponse(_StrictModel):
         )
 
     @staticmethod
-    def from_jrpc_error(id: JsonRpcId, error: JsonRpcError) -> JsonRpcResponse:
+    def from_jrpc_error(
+        id: JsonRpcId, error: JsonRpcError | Exception
+    ) -> JsonRpcResponse:
         """Build an error response.
 
         Args:
@@ -463,7 +471,7 @@ class JsonRpcResponse(_StrictModel):
         Returns:
             A :class:`JsonRpcResponse` with only ``error`` set.
         """
-        return JsonRpcResponse(id=id, error=error)
+        return JsonRpcResponse(id=id, error=JsonRpcError.from_error(error))
 
     @staticmethod
     def from_jrpc_result(id: JsonRpcId, result: Any) -> JsonRpcResponse:

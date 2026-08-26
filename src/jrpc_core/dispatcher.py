@@ -9,13 +9,14 @@ notifications to the appropriate handler.
 
 Typical usage::
 
+    import asyncio
     from jrpc_core.dispatcher import JsonRpcDispatcher, JsonRpcMethodWrapper
 
     dispatcher = JsonRpcDispatcher()
     dispatcher.request_handler_registry.add(
         JsonRpcMethodWrapper(name="add", method=lambda args: args[0] + args[1])
     )
-    response = dispatcher(JsonRpcRequest(method="add", params=[1, 2]))
+    response = asyncio.run(dispatcher(JsonRpcRequest(method="add", params=[1, 2])))
 """
 
 import asyncio
@@ -173,9 +174,9 @@ class JsonRpcMethodWrapper:
                         return Err(err)
                 else:
                     return Ok(converted_args)
-            except Exception as err:
+            except Exception as exc:
                 err = JsonRpcErrorCode.ConversionError.into()
-                err.data = converted_args.unwrap_err()
+                err.data = exc
                 return Err(err)
         else:
             return Ok(params)
@@ -640,7 +641,7 @@ class JsonRpcDispatcher:
         if isinstance(data, str):
             res = self.try_parse(data)
             if res.is_ok():
-                return self(res.unwrap())
+                return await self(res.unwrap())
             else:
                 return Some(Err(JsonRpcErrorCode.ParseError.into()))
         elif isinstance(data, JsonRpcNotification):
@@ -691,8 +692,8 @@ class JsonRpcDispatcher:
         if maybe_method.is_none():
             return request.into(JsonRpcErrorCode.MethodNotFound.into())
 
-        method = await maybe_method.unwrap()
-        ret_value = method(self._extract_params(request))
+        method = maybe_method.unwrap()
+        ret_value = await method(self._extract_params(request))
         return self._make_jrpc_response(request, ret_value)
 
     def _make_jrpc_response(

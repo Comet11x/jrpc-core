@@ -18,8 +18,10 @@ Typical usage::
     response = dispatcher(JsonRpcRequest(method="add", params=[1, 2]))
 """
 
+import asyncio
+import inspect
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from pyfplib import Err, Nothing, Option, Ok, Result, Some
 
@@ -46,6 +48,30 @@ ValidatorType = Callable[..., Option[JsonRpcError] | bool]
 A validator receives the parsed ``params`` payload and reports whether
 they are acceptable (see :meth:`JsonRpcMethodWrapper._validate`).
 """
+
+
+class _AsyncWrapper:
+    def __init__(self, fn: Callable[..., Any]):
+        self._fn = fn
+
+    async def __call__(self, *args, **kwargs) -> Awaitable[Any]:
+        return self._fn(*args, **kwargs)
+
+    @staticmethod
+    def wrap(fn: Callable[..., Any]) -> Callable[..., Any] | "_AsyncWrapper":
+        return (
+            fn
+            if inspect.iscoroutinefunction(fn)
+            or inspect.iscoroutinefunction(fn.__call__)
+            else _AsyncWrapper(fn)
+        )
+
+    @staticmethod
+    def try_wrap(fn: Any) -> Option[Callable[..., Any] | "_AsyncWrapper"]:
+        if isinstance(fn, Callable):
+            return Some(_AsyncWrapper.wrap(fn))
+        else:
+            return Nothing()
 
 
 class JsonRpcMethodWrapper:
@@ -81,7 +107,7 @@ class JsonRpcMethodWrapper:
                 become :attr:`JsonRpcErrorCode.ConversionError`.
         """
         self._name = name
-        self._method = method
+        self._method = _AsyncWrapper.wrap(method)
         self._validator: ValidatorType = validator
         self._converter = converter
 
@@ -179,7 +205,7 @@ class JsonRpcMethodWrapper:
                 return Some(JsonRpcError.from_error(err))
         return Nothing()
 
-    def __call__(self, params: Option[Any]) -> Result[Any, JsonRpcError]:
+    async def __call__(self, params: Option[Any]) -> Result[Any, JsonRpcError]:
         """Execute the wrapped method with optional parameters.
 
         Validation runs first, then conversion; if either step rejects the
@@ -204,29 +230,30 @@ class JsonRpcMethodWrapper:
             else:
                 params = res.unwrap()
 
-            return self._call_with_params(params)
+            return await self._call_with_params(params)
         else:
-            return self._call_without_params()
+            return await self._call_without_params()
 
-    def _call_without_params(self) -> Result[Any, JsonRpcError]:
+    async def _call_without_params(self) -> Result[Any, JsonRpcError]:
         """Invoke the wrapped method with no arguments.
 
         Returns:
             ``Ok(result)`` on success, or ``Err(JsonRpcError)`` on failure.
         """
-        return (
-            Result.try_call(self._method)
-            .map_err(
-                lambda err: (
-                    err
-                    if isinstance(err, JsonRpcError)
-                    else JsonRpcErrorCode.ExecutionError.into(err)
-                )
+        try:
+            res = Ok(await self._method()).flatten()
+            if res.is_err() and not isinstance(res.unwrap_err(), JsonRpcError):
+                res = Err(JsonRpcErrorCode.ExecutionError.into(res.unwrap_err()))
+            return res
+        except Exception as e:
+            err = (
+                e
+                if isinstance(e, JsonRpcError)
+                else JsonRpcErrorCode.ExecutionError.into(e)
             )
-            .flatten()
-        )
+            return Err(err)
 
-    def _call_with_params(self, params: Any) -> Result[Any, JsonRpcError]:
+    async def _call_with_params(self, params: Any) -> Result[Any, JsonRpcError]:
         """Invoke the wrapped method with the converted parameters.
 
         Args:
@@ -235,17 +262,18 @@ class JsonRpcMethodWrapper:
         Returns:
             ``Ok(result)`` on success, or ``Err(JsonRpcError)`` on failure.
         """
-        return (
-            Result.try_call(self._method, params)
-            .map_err(
-                lambda err: (
-                    err
-                    if isinstance(err, JsonRpcError)
-                    else JsonRpcErrorCode.ExecutionError.into(err)
-                )
+        try:
+            res = Ok(await self._method(params)).flatten()
+            if res.is_err() and not isinstance(res.unwrap_err(), JsonRpcError):
+                res = Err(JsonRpcErrorCode.ExecutionError.into(res.unwrap_err()))
+            return res
+        except Exception as e:
+            err = (
+                e
+                if isinstance(e, JsonRpcError)
+                else JsonRpcErrorCode.ExecutionError.into(e)
             )
-            .flatten()
-        )
+            return Err(err)
 
 
 class JsonRpcHandlerCollection:
@@ -486,8 +514,8 @@ class JsonRpcDispatcher:
         self._registry: dict[
             str, tuple[JsonRpcResponseCtorWrapper._When, JsonRpcResponseCtorWrapper]
         ] = {}
-        self._response_handler = (
-            response_handler if isinstance(response_handler, Callable) else None
+        self._response_handler: Option[Callable[..., Any] | "_AsyncWrapper"] = (
+            _AsyncWrapper.try_wrap(response_handler)
         )
 
     def emplace_custom_response_ctor(
@@ -588,14 +616,13 @@ class JsonRpcDispatcher:
             )
         )
 
-    def __call__(
+    async def __call__(
         self,
         data: str
         | JsonRpcRequest
         | JsonRpcNotification
         | JsonRpcResponse
         | Result[JsonRpcRequest | JsonRpcNotification | JsonRpcResponse, JsonRpcError],
-        ctor=JsonRpcResponse,
     ) -> Option[Result[JsonRpcResponse, JsonRpcError]]:
         """Dispatch a JSON-RPC message.
 
@@ -617,18 +644,21 @@ class JsonRpcDispatcher:
             else:
                 return Some(Err(JsonRpcErrorCode.ParseError.into()))
         elif isinstance(data, JsonRpcNotification):
-            return self._handle_notification(data).map(lambda err: Err(err))
+            return (await self._handle_notification(data)).map(lambda err: Err(err))
         elif isinstance(data, JsonRpcRequest):
-            return Some(Ok(self._handle_request(data)))
-        elif isinstance(data, JsonRpcResponse) and self._response_handler is not None:
-            self._response_handler(data)
+            return Some(Ok(await self._handle_request(data)))
+        elif isinstance(data, JsonRpcResponse):
+            self._response_handler.map(lambda fn: await fn(data))
             return Nothing()
         elif isinstance(data, Result):
-            return self(data.unwrap())
+            if data.is_ok():
+                return await self(data.flatten().unwrap())
+            else:
+                return Some(JsonRpcError.from_error(data.unwrap_err()))
         else:
             return Some(Err(JsonRpcErrorCode.InternalError.into()))
 
-    def _handle_notification(
+    async def _handle_notification(
         self, notification: JsonRpcNotification
     ) -> Option[JsonRpcError]:
         """Route a notification to its handler.
@@ -644,10 +674,10 @@ class JsonRpcDispatcher:
         if maybe_method.is_none():
             return Some(JsonRpcErrorCode.MethodNotFound.into())
         method = maybe_method.unwrap()
-        method(self._extract_params(notification))
+        await method(self._extract_params(notification))
         return Nothing()
 
-    def _handle_request(self, request: JsonRpcRequest) -> JsonRpcResponse:
+    async def _handle_request(self, request: JsonRpcRequest) -> JsonRpcResponse:
         """Route a request to its handler and build a response.
 
         Args:
@@ -660,7 +690,7 @@ class JsonRpcDispatcher:
         if maybe_method.is_none():
             return request.into(JsonRpcErrorCode.MethodNotFound.into())
 
-        method = maybe_method.unwrap()
+        method = await maybe_method.unwrap()
         ret_value = method(self._extract_params(request))
         return self._make_jrpc_response(request, ret_value)
 

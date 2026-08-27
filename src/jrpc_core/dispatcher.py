@@ -636,9 +636,12 @@ class JsonRpcDispatcher:
         def decorator(
             fn: Callable[[JsonRpcRequest], Any],
         ) -> Callable[[JsonRpcRequest], Any]:
-            name: str = cast(
-                str, Result.try_call(getattr, fn, "__name__").unwrap_or(str(method))
-            )
+            if method is None:
+                name: str = cast(
+                    str, Result.try_call(getattr, fn, "__name__").unwrap_or(str(method))
+                )
+            else:
+                name = method
 
             self.emplace_request_handler(
                 name=name, method=fn, validator=validator, converter=converter
@@ -661,9 +664,13 @@ class JsonRpcDispatcher:
         def decorator(
             fn: Callable[[JsonRpcNotification], None],
         ) -> Callable[[JsonRpcNotification], None]:
-            name: str = cast(
-                str, Result.try_call(getattr, fn, "__name__").unwrap_or(str(method))
-            )
+            if method is None:
+                name: str = cast(
+                    str, Result.try_call(getattr, fn, "__name__").unwrap_or(str(method))
+                )
+            else:
+                name = method
+
             self.emplace_notification_handler(
                 name=name, method=fn, validator=validator, converter=converter
             )

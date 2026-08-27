@@ -19,7 +19,6 @@ Typical usage::
     response = asyncio.run(dispatcher(JsonRpcRequest(method="add", params=[1, 2])))
 """
 
-import asyncio
 import inspect
 from enum import Enum
 from typing import Any, Awaitable, Callable
@@ -515,9 +514,9 @@ class JsonRpcDispatcher:
         self._registry: dict[
             str, tuple[JsonRpcResponseCtorWrapper._When, JsonRpcResponseCtorWrapper]
         ] = {}
-        self._response_handler: Option[Callable[..., Any] | "_AsyncWrapper"] = (
-            _AsyncWrapper.try_wrap(response_handler)
-        )
+        self._response_handlers: list[Callable[[JsonRpcResponse], None] | Callable[[Any], None]] = []
+        if isinstance(response_handler, Callable):
+            self._response_handlers.append(_AsyncWrapper.wrap(response_handler))
 
     def emplace_custom_response_ctor(
         self, method: str, ctor: Callable[..., JsonRpcResponse], *states
@@ -663,9 +662,14 @@ class JsonRpcDispatcher:
         converter: Callable[[JsonRpcResponse], Any] | None = None,
     ):
         def decorator(fn: Callable[[JsonRpcResponse | Any], None]):
+            fn_wrapper = _AsyncWrapper(fn)
+
             async def wrapper(message: JsonRpcResponse):
-                arg = converter(message) if isinstance(converter, Callable) else message
-                await fn(arg)
+                arg = converter(message) if isinstance(converter, Callable)\
+                    else message
+                await fn_wrapper(arg)
+
+            self._response_handlers.append(fn_wrapper)
 
             return wrapper
 
@@ -702,9 +706,9 @@ class JsonRpcDispatcher:
             return (await self._handle_notification(data)).map(lambda err: Err(err))
         elif isinstance(data, JsonRpcRequest):
             return Some(Ok(await self._handle_request(data)))
-        elif isinstance(data, JsonRpcResponse) and self._response_handler.is_some():
-            fn = self._response_handler.unwrap()
-            await fn(data)
+        elif isinstance(data, JsonRpcResponse):
+            for fn in self._response_handlers:
+                await fn(data)
             return Nothing()
         elif isinstance(data, Result):
             if data.is_ok():

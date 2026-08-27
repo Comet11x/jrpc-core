@@ -514,9 +514,13 @@ class JsonRpcDispatcher:
         self._registry: dict[
             str, tuple[JsonRpcResponseCtorWrapper._When, JsonRpcResponseCtorWrapper]
         ] = {}
-        self._response_handlers: list[Callable[[JsonRpcResponse], None] | Callable[[Any], None]] = []
+        self._response_handler_collection: list[
+            Callable[[JsonRpcResponse], None] | Callable[[Any], None]
+        ] = []
         if isinstance(response_handler, Callable):
-            self._response_handlers.append(_AsyncWrapper.wrap(response_handler))
+            self._response_handler_collection.append(
+                _AsyncWrapper.wrap(response_handler)
+            )
 
     def emplace_custom_response_ctor(
         self, method: str, ctor: Callable[..., JsonRpcResponse], *states
@@ -665,11 +669,10 @@ class JsonRpcDispatcher:
             fn_wrapper = _AsyncWrapper(fn)
 
             async def wrapper(message: JsonRpcResponse):
-                arg = converter(message) if isinstance(converter, Callable)\
-                    else message
+                arg = converter(message) if isinstance(converter, Callable) else message
                 await fn_wrapper(arg)
 
-            self._response_handlers.append(fn_wrapper)
+            self._response_handler_collection.append(fn_wrapper)
 
             return wrapper
 
@@ -707,8 +710,7 @@ class JsonRpcDispatcher:
         elif isinstance(data, JsonRpcRequest):
             return Some(Ok(await self._handle_request(data)))
         elif isinstance(data, JsonRpcResponse):
-            for fn in self._response_handlers:
-                await fn(data)
+            await self._handle_response(data)
             return Nothing()
         elif isinstance(data, Result):
             if data.is_ok():
@@ -753,6 +755,10 @@ class JsonRpcDispatcher:
         method = maybe_method.unwrap()
         ret_value = await method(self._extract_params(request))
         return self._make_jrpc_response(request, ret_value)
+
+    async def _handle_response(self, response: JsonRpcResponse):
+        for fn in self._response_handler_collection:
+            await fn(response)
 
     def _make_jrpc_response(
         self, request: JsonRpcRequest, result: Result[Any, JsonRpcError]

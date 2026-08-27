@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "jrpc-core"
 dynamic = ["version"]
-description = ''
+description = 'A lightweight, type-safe Python implementation of the JSON-RPC 2.0 specification'
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

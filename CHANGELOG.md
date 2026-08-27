@@ -30,7 +30,13 @@ Types of changes
 - Security in case of vulnerabilities.
 -->
 
-## [0.1.1] - 2026-08-26
+## [0.2.0] - 2026-08-28
+
+### Added
+
+- JsonRpcDispatcher decorators.
+
+## [0.1.1] - 2026-08-27
 
 ### Fixed
 

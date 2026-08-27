@@ -617,6 +617,60 @@ class JsonRpcDispatcher:
             )
         )
 
+    def request(
+        self,
+        *,
+        method: str | None = None,
+        validator: ValidatorType | None = None,
+        converter: ConverterType | None = None,
+    ) -> Callable[Callable[[JsonRpcRequest], Any]]:
+        def decorator(
+            fn: Callable[[JsonRpcRequest], Any],
+        ) -> Callable[[JsonRpcRequest], Any]:
+            name = fn.__name__ if method is None else method
+            self.emplace_request_handler(
+                name=name, method=fn, validator=validator, converter=converter
+            )
+            # def wrapper(*args, **kwarg):
+            #    return fn(*args, **kwarg)
+            return fn
+
+        return decorator
+
+    def notification(
+        self,
+        *,
+        method: str | None = None,
+        validator: ValidatorType | None = None,
+        converter: ConverterType | None = None,
+    ) -> Callable[Callable[JsonRpcNotification], None]:
+        def decorator(
+            fn: Callable[[JsonRpcNotification], None],
+        ) -> Callable[[JsonRpcNotification], None]:
+            name = fn.__name__ if method is None else method
+            self.emplace_notification_handler(
+                name=name, method=fn, validator=validator, converter=converter
+            )
+            # def wrapper(*args, **kwarg):
+            #    return fn(*args, **kwarg)
+            return fn
+
+        return decorator
+
+    def response(
+        self,
+        *,
+        converter: Callable[[JsonRpcResponse], Any] | None = None,
+    ):
+        def decorator(fn: Callable[[JsonRpcResponse | Any], None]):
+            async def wrapper(message: JsonRpcResponse):
+                arg = converter(message) if isinstance(converter, Callable) else message
+                await fn(arg)
+
+            return wrapper
+
+        return decorator
+
     async def __call__(
         self,
         data: str

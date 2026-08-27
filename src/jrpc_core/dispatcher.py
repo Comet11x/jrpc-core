@@ -21,9 +21,9 @@ Typical usage::
 
 import inspect
 from enum import Enum
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
-from pyfplib import Err, Nothing, Option, Ok, Result, Some
+from pyfplib import Err, Nothing, Ok, Option, Result, Some
 
 from jrpc_core.messages import (
     JsonRpcError,
@@ -108,7 +108,7 @@ class JsonRpcMethodWrapper:
         """
         self._name = name
         self._method = _AsyncWrapper.wrap(method)
-        self._validator: ValidatorType = validator
+        self._validator: ValidatorType | None = validator
         self._converter = converter
 
     @property
@@ -120,7 +120,7 @@ class JsonRpcMethodWrapper:
         """Return a hash based on the method name."""
         return hash(self._name)
 
-    def __eq__(self, other: "JsonRpcMethodWrapper") -> bool:
+    def __eq__(self, other: object) -> bool:
         """Compare two wrappers by method name."""
         return isinstance(other, JsonRpcMethodWrapper) and self._name == other._name
 
@@ -411,13 +411,15 @@ class JsonRpcResponseCtorWrapper:
 
         def __eq__(
             self,
-            other: "JsonRpcResponseCtorWrapper._When | JsonRpcResponseCtorWrapper.State",
+            other: object,
         ) -> bool:
             """Compare against another ``When``, or test ``State`` membership."""
             if isinstance(other, JsonRpcResponseCtorWrapper.State):
                 return (self._code & int(other)) != 0
-            else:
+            elif isinstance(other, JsonRpcResponseCtorWrapper._When):
                 return self._code == other._code
+            else:
+                return False
 
         def __int__(self) -> int:
             """Return the underlying bitmask."""
@@ -515,11 +517,15 @@ class JsonRpcDispatcher:
             str, tuple[JsonRpcResponseCtorWrapper._When, JsonRpcResponseCtorWrapper]
         ] = {}
         self._response_handler_collection: list[
-            Callable[[JsonRpcResponse], None] | Callable[[Any], None]
+            Callable[[JsonRpcResponse], Awaitable[None]]
+            | Callable[[Any], Awaitable[None]]
         ] = []
         if isinstance(response_handler, Callable):
             self._response_handler_collection.append(
-                _AsyncWrapper.wrap(response_handler)
+                cast(
+                    Callable[[JsonRpcResponse], Awaitable[None]],
+                    _AsyncWrapper.wrap(response_handler),
+                )
             )
 
     def emplace_custom_response_ctor(
@@ -626,11 +632,14 @@ class JsonRpcDispatcher:
         method: str | None = None,
         validator: ValidatorType | None = None,
         converter: ConverterType | None = None,
-    ) -> Callable[Callable[[JsonRpcRequest], Any]]:
+    ) -> Callable[[Callable[[JsonRpcRequest], Any]], Callable[[JsonRpcRequest], Any]]:
         def decorator(
             fn: Callable[[JsonRpcRequest], Any],
         ) -> Callable[[JsonRpcRequest], Any]:
-            name = fn.__name__ if method is None else method
+            name: str = cast(
+                str, Result.try_call(getattr, fn, "__name__").unwrap_or(str(method))
+            )
+
             self.emplace_request_handler(
                 name=name, method=fn, validator=validator, converter=converter
             )
@@ -646,11 +655,15 @@ class JsonRpcDispatcher:
         method: str | None = None,
         validator: ValidatorType | None = None,
         converter: ConverterType | None = None,
-    ) -> Callable[Callable[JsonRpcNotification], None]:
+    ) -> Callable[
+        [Callable[[JsonRpcNotification], None]], Callable[[JsonRpcNotification], None]
+    ]:
         def decorator(
             fn: Callable[[JsonRpcNotification], None],
         ) -> Callable[[JsonRpcNotification], None]:
-            name = fn.__name__ if method is None else method
+            name: str = cast(
+                str, Result.try_call(getattr, fn, "__name__").unwrap_or(str(method))
+            )
             self.emplace_notification_handler(
                 name=name, method=fn, validator=validator, converter=converter
             )
@@ -664,11 +677,18 @@ class JsonRpcDispatcher:
         self,
         *,
         converter: Callable[[JsonRpcResponse], Any] | None = None,
-    ):
-        def decorator(fn: Callable[[JsonRpcResponse | Any], None]):
-            fn_wrapper = _AsyncWrapper(fn)
+    ) -> Callable[
+        [Callable[[JsonRpcResponse | Any], None]],
+        Callable[[JsonRpcResponse | Any], Awaitable[None]],
+    ]:
+        def decorator(
+            fn: Callable[[JsonRpcResponse | Any], None],
+        ) -> Callable[[JsonRpcResponse | Any], Awaitable[None]]:
+            fn_wrapper = cast(
+                Callable[[JsonRpcResponse | Any], Awaitable[None]], _AsyncWrapper(fn)
+            )
 
-            async def wrapper(message: JsonRpcResponse):
+            async def wrapper(message: JsonRpcResponse | Any):
                 arg = converter(message) if isinstance(converter, Callable) else message
                 await fn_wrapper(arg)
 
@@ -716,8 +736,9 @@ class JsonRpcDispatcher:
             if data.is_ok():
                 return await self(data.flatten().unwrap())
             else:
-                return Some(JsonRpcError.from_error(data.unwrap_err()))
+                return Some(Err(JsonRpcError.from_error(data.unwrap_err())))
         else:
+            # TODO need to add an error for this case
             return Some(Err(JsonRpcErrorCode.InternalError.into()))
 
     async def _handle_notification(
@@ -750,7 +771,9 @@ class JsonRpcDispatcher:
         """
         maybe_method = self._request_handler_registry.try_get(request.method)
         if maybe_method.is_none():
-            return request.into(JsonRpcErrorCode.MethodNotFound.into())
+            return JsonRpcResponse.from_jrpc_error(
+                request.id, JsonRpcErrorCode.MethodNotFound.into()
+            )
 
         method = maybe_method.unwrap()
         ret_value = await method(self._extract_params(request))

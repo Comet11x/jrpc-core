@@ -36,7 +36,7 @@ from enum import Enum, StrEnum
 from typing import Any, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pyfplib import Option, Result
 
 JsonRpcId = str | int | float | None
@@ -196,12 +196,14 @@ class JsonRpcError(_StrictModel):
                 Option[int | JsonRpcErrorCode],
                 Result.try_call(getattr, cast(Any, error), "code").ok(),
             )
-            maybe_message: Option[str] = Result.try_call(
-                getattr, cast(error, Any), "message"
-            ).ok()
-            maybe_data: Option[str] = Result.try_call(
-                getattr, cast(error, Any), "data"
-            ).ok()
+            maybe_message: Option[str] = cast(
+                Option[str],
+                Result.try_call(Option[str], getattr, cast(Any, error), "message").ok(),
+            )
+            maybe_data: Option[Any] = cast(
+                Option[Any],
+                Result.try_call(getattr, cast(Any, error), "data").ok(),
+            )
             if maybe_code.is_some():
                 code = int(maybe_code.unwrap())
                 message = (

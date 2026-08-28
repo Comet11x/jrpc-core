@@ -30,6 +30,12 @@ Types of changes
 - Security in case of vulnerabilities.
 -->
 
+## [0.2.1] - 2026-08-28
+
+### Fixed
+
+- Overloaded `model_dump` and `model_dump_json` for JSON RPC messages.
+
 ## [0.2.0] - 2026-08-28
 
 ### Added

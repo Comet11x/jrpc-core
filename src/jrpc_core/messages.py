@@ -279,6 +279,30 @@ class JsonRpcRequest(_StrictModel):
         """
         return Result.try_call(cls.model_validate_json, data, strict=True)
 
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Serialize the request to a plain dictionary.
+
+        The ``params`` key is omitted when ``None``.
+
+        Returns:
+            A dictionary suitable for JSON serialisation.
+        """
+        data: dict[str, Any] = super().model_dump(**kwargs)
+        if self.params is None:
+            data.pop("params", None)
+        return data
+
+    def model_dump_json(self, **kwargs) -> str:
+        """Serialize the request to a JSON string.
+
+        Alias for :meth:`to_json`.
+
+        Returns:
+            A compact JSON representation of this request.
+        """
+        data = self.model_dump(**kwargs)
+        return json.dumps(data)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the request to a plain dictionary.
 
@@ -287,10 +311,7 @@ class JsonRpcRequest(_StrictModel):
         Returns:
             A dictionary suitable for JSON serialisation.
         """
-        data = self.model_dump()
-        if self.params is None:
-            data.pop("params", None)
-        return data
+        return self.model_dump()
 
     def to_json(self) -> str:
         """Serialize the request to a JSON string.
@@ -298,7 +319,7 @@ class JsonRpcRequest(_StrictModel):
         Returns:
             A compact JSON representation of this request.
         """
-        return json.dumps(self.to_dict())
+        return self.model_dump_json()
 
     def serialize(self) -> str:
         """Serialize the request to a JSON string.
@@ -387,6 +408,28 @@ class JsonRpcNotification(_StrictModel):
         """
         return Result.try_call(cls.model_validate_json, data, strict=True)
 
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Serialize the notification to a plain dictionary.
+
+        The ``params`` key is omitted when ``None``.
+
+        Returns:
+            A dictionary suitable for JSON serialisation.
+        """
+        data: dict[str, Any] = super().model_dump(**kwargs)
+        if self.params is None:
+            data.pop("params", None)
+        return data
+
+    def model_dump_json(self, **kwargs) -> str:
+        """Serialize the notification to a JSON string.
+
+        Returns:
+            A compact JSON representation of this notification.
+        """
+        data = self.model_dump(**kwargs)
+        return json.dumps(data)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize the notification to a plain dictionary.
 
@@ -395,10 +438,7 @@ class JsonRpcNotification(_StrictModel):
         Returns:
             A dictionary suitable for JSON serialisation.
         """
-        data = self.model_dump()
-        if self.params is None:
-            data.pop("params", None)
-        return data
+        return self.model_dump()
 
     def to_json(self) -> str:
         """Serialize the notification to a JSON string.
@@ -406,7 +446,7 @@ class JsonRpcNotification(_StrictModel):
         Returns:
             A compact JSON representation of this notification.
         """
-        return json.dumps(self.to_dict())
+        return self.model_dump_json()
 
     def serialize(self) -> str:
         """Serialize the notification to a JSON string.
@@ -523,6 +563,35 @@ class JsonRpcResponse(_StrictModel):
             ``Ok(response)`` on success, or ``Err(exception)`` on parse/validation failure.
         """
         return Result.try_call(JsonRpcResponse.model_validate_json, data, strict=True)
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Serialize the response to a plain dictionary.
+
+        When an ``error`` is present the ``result`` key is removed and the
+        error code is coerced to ``int``.  When ``result`` is present the
+        ``error`` key is removed.
+
+        Returns:
+            A dictionary suitable for JSON serialisation.
+        """
+        data: dict[str, Any] = super().model_dump(**kwargs)
+        if self.error is not None:
+            data.pop("result", None)
+            data["error"]["code"] = int(
+                data["error"].get("code", JsonRpcErrorCode.default())
+            )
+        else:
+            data.pop("error", None)
+        return data
+
+    def model_dump_json(self, **kwargs) -> str:
+        """Serialize the response to a JSON string.
+
+        Returns:
+            A compact JSON representation of this response.
+        """
+        data = self.model_dump(**kwargs)
+        return json.dumps(data)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the response to a plain dictionary.

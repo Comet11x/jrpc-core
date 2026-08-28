@@ -329,6 +329,23 @@ class TestJsonRpcResponse:
         assert parsed["id"] == "x"
         assert parsed["result"] == {"key": "val"}
 
+    def test_model_dump_json(self):
+        resp = JsonRpcResponse(id=1, result={"key": "val"})
+        raw = resp.model_dump_json()
+        parsed = json.loads(raw)
+        assert parsed["id"] == 1
+        assert parsed["result"] == {"key": "val"}
+        assert "error" not in parsed
+
+    def test_model_dump_json_with_error(self):
+        resp = JsonRpcResponse(
+            id=1, error=JsonRpcError(code=JsonRpcErrorCode.InvalidParams, message="bad")
+        )
+        parsed = json.loads(resp.model_dump_json())
+        assert "result" not in parsed
+        assert parsed["error"]["code"] == -32602
+        assert parsed["error"]["message"] == "bad"
+
     def test_serialize_matches_to_json(self):
         resp = JsonRpcResponse(id=1, result="ok")
         assert resp.serialize() == resp.to_json()

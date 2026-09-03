@@ -14,7 +14,7 @@ from jrpc_core.messages import JsonRpcRequest, JsonRpcResponse
 
 # Build a request
 request = JsonRpcRequest(method="add", params=[1, 2])
-print(request.to_json())
+print(request.serialize())
 # {"jsonrpc":"2.0","method":"add","params":[1,2],"id":"<uuid>"}
 
 # Create a response from a Result
@@ -29,10 +29,16 @@ print(response.to_json())
 from pyfplib import Result
 from jrpc_core.dispatcher import JsonRpcDispatcher, JsonRpcMethodWrapper
 
-def add(args):
-    return args[0] + args[1]
-
 dispatcher = JsonRpcDispatcher()
+
+@dispatcher.request()
+def sum(args: list[int]):
+    return sum(args)
+
+@dispatcher.request(method="concat")
+def join(args: list[str]):
+    retu
+
 dispatcher.request_handler_registry.add(
     JsonRpcMethodWrapper(name="add", method=add)
 )

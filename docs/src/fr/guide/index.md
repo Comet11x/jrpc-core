@@ -22,11 +22,11 @@ Chaîne JSON entrante
         ▼
    try_parse()
         │
-   ┌────┴────┐
-   │         │
-Requête  Notification
-   │         │
-   ▼         ▼
+   ┌────┴────┬──────┐
+   │         │      │
+Requête  Notification  Réponse
+   │         │      │
+   ▼         ▼      ▼
 JsonRpcDispatcher.__call__()
    │
    ├──► recherche dans le registre des handlers

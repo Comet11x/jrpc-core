@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 
 from pyfplib import Err, Nothing, Ok, Result, Some
@@ -932,7 +933,7 @@ class TestJsonRpcDispatcherResponseDecorator:
         def handler(msg):
             return msg
 
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
 
         asyncio.run(handler(JsonRpcResponse(id=1, result="x")))
 

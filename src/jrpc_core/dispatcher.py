@@ -698,8 +698,6 @@ class JsonRpcDispatcher:
                 converter=converter,
                 response_ctor=response_ctor,
             )
-            # def wrapper(*args, **kwarg):
-            #    return fn(*args, **kwarg)
             return fn
 
         return decorator
@@ -726,8 +724,6 @@ class JsonRpcDispatcher:
             self.emplace_notification_handler(
                 name=name, method=fn, validator=validator, converter=converter
             )
-            # def wrapper(*args, **kwarg):
-            #    return fn(*args, **kwarg)
             return fn
 
         return decorator
@@ -797,7 +793,6 @@ class JsonRpcDispatcher:
             else:
                 return Some(Err(JsonRpcError.from_error(data.unwrap_err())))
         else:
-            # TODO need to add an error for this case
             return Some(Err(JsonRpcErrorCode.InternalError.into()))
 
     async def _handle_notification(

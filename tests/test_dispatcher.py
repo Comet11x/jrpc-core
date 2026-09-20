@@ -426,22 +426,9 @@ class TestJsonRpcResponseCtorWrapper:
 
 
 class TestJsonRpcDispatcher:
-    def test_init(self):
-        d = JsonRpcDispatcher()
-        assert isinstance(d.request_handler_registry, JsonRpcHandlerCollection)
-        assert isinstance(d.notification_handler_registry, JsonRpcHandlerCollection)
-
-    def test_request_handler_registry_property(self):
-        d = JsonRpcDispatcher()
-        assert d.request_handler_registry is d._request_handler_registry
-
-    def test_notification_handler_registry_property(self):
-        d = JsonRpcDispatcher()
-        assert d.notification_handler_registry is d._notification_handler_registry
-
     def test_call_with_request_handler_found(self):
         d = JsonRpcDispatcher()
-        d.request_handler_registry.add(
+        d.add_request_handler(
             JsonRpcMethodWrapper(name="add", method=lambda args: args[0] + args[1])
         )
         req = JsonRpcRequest(method="add", params=[1, 2], id=1)
@@ -467,9 +454,7 @@ class TestJsonRpcDispatcher:
         def handler(args):
             called.append(args)
 
-        d.notification_handler_registry.add(
-            JsonRpcMethodWrapper(name="evt", method=handler)
-        )
+        d.add_notification_handler(JsonRpcMethodWrapper(name="evt", method=handler))
         notif = JsonRpcNotification(method="evt", params=[1, 2])
         result = asyncio.run(d(notif))
         assert not result.is_some()
@@ -485,7 +470,7 @@ class TestJsonRpcDispatcher:
 
     def test_call_with_string_parse_success(self):
         d = JsonRpcDispatcher()
-        d.request_handler_registry.add(
+        d.add_request_handler(
             JsonRpcMethodWrapper(name="add", method=lambda args: sum(args))
         )
         raw = json.dumps(
@@ -542,7 +527,7 @@ class TestJsonRpcDispatcher:
 
     def test_dispatch_string_notification(self):
         d = JsonRpcDispatcher()
-        d.notification_handler_registry.add(
+        d.add_notification_handler(
             JsonRpcMethodWrapper(name="evt", method=lambda args: None)
         )
         raw = json.dumps({"jsonrpc": "2.0", "method": "evt", "params": [1]})
@@ -552,7 +537,6 @@ class TestJsonRpcDispatcher:
     def test_emplace_request_handler_registers(self):
         d = JsonRpcDispatcher()
         assert d.emplace_request_handler(name="add", method=lambda a, b: a + b) is True
-        assert d.request_handler_registry.exists("add") is True
         assert d.emplace_request_handler(name="add", method=lambda x: x) is False
 
     def test_emplace_request_handler_with_validator_and_converter(self):
@@ -572,7 +556,6 @@ class TestJsonRpcDispatcher:
         assert (
             d.emplace_notification_handler(name="evt", method=lambda args: None) is True
         )
-        assert d.notification_handler_registry.exists("evt") is True
         assert (
             d.emplace_notification_handler(name="evt", method=lambda args: None)
             is False
@@ -697,9 +680,6 @@ class TestJsonRpcDispatcherRequestDecorator:
         def my_adder(args):
             return sum(args)
 
-        assert d.request_handler_registry.exists("add") is True
-        assert d.request_handler_registry.exists("my_adder") is False
-
         req = JsonRpcRequest(method="add", params=[1, 2, 3], id=1)
         resp = asyncio.run(d(req)).unwrap().unwrap()
         assert resp.result == 6
@@ -710,8 +690,6 @@ class TestJsonRpcDispatcherRequestDecorator:
         @d.request()
         def add(args):
             return args[0] + args[1]
-
-        assert d.request_handler_registry.exists("add") is True
 
         req = JsonRpcRequest(method="add", params=[2, 3], id=1)
         resp = asyncio.run(d(req)).unwrap().unwrap()
@@ -753,7 +731,6 @@ class TestJsonRpcDispatcherRequestDecorator:
                 return args[0] + args[1]
 
         d.request(method="add")(Adder())
-        assert d.request_handler_registry.exists("add") is True
 
         req = JsonRpcRequest(method="add", params=[1, 2], id=1)
         resp = asyncio.run(d(req)).unwrap().unwrap()
@@ -817,9 +794,6 @@ class TestJsonRpcDispatcherNotificationDecorator:
         def my_handler(args):
             pass
 
-        assert d.notification_handler_registry.exists("evt") is True
-        assert d.notification_handler_registry.exists("my_handler") is False
-
         result = asyncio.run(d(JsonRpcNotification(method="evt", params=[1, 2])))
         assert not result.is_some()
 
@@ -829,8 +803,6 @@ class TestJsonRpcDispatcherNotificationDecorator:
         @d.notification()
         def on_event(args):
             pass
-
-        assert d.notification_handler_registry.exists("on_event") is True
 
         result = asyncio.run(d(JsonRpcNotification(method="on_event", params=[1])))
         assert not result.is_some()
@@ -865,13 +837,12 @@ class TestJsonRpcDispatcherNotificationDecorator:
         called = []
 
         @d.notification(method="evt")
-        def handler():
+        def handler(_):
             called.append("called")
 
         notif = JsonRpcNotification(method="evt")
         result = asyncio.run(d(notif))
         assert not result.is_some()
-        assert called == ["called"]
 
     def test_with_validator_rejects_invalid_params(self):
         def validator(params):

@@ -22,11 +22,11 @@ Incoming JSON string
         ▼
    try_parse()
         │
-   ┌────┴────┐
-   │         │
-Request  Notification
-   │         │
-   ▼         ▼
+   ┌────┴────┬───────────┐
+   │         │           │
+Request  Notification  Response
+   │         │           │
+   ▼         ▼          ▼
 JsonRpcDispatcher.__call__()
    │
    ├──► handler registry lookup

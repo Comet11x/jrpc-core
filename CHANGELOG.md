@@ -30,6 +30,18 @@ Types of changes
 - Security in case of vulnerabilities.
 -->
 
+## [0.3.1] - 2026-09-19
+
+### Removed
+
+- The documentation and examples from the package
+
+## [0.3.0] - 2026-09-04
+
+### Updated
+
+- Added variadic and keyword arguments for JsonRpcMethodWrapper.
+
 ## [0.2.1] - 2026-08-28
 
 ### Fixed

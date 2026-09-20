@@ -22,11 +22,11 @@ Stringa JSON in arrivo
         ▼
    try_parse()
         │
-   ┌────┴────┐
-   │         │
-Richiesta  Notifica
-   │         │
-   ▼         ▼
+   ┌────┴────┬──────┐
+   │         │      │
+Richiesta  Notifica  Risposta
+   │         │      │
+   ▼         ▼      ▼
 JsonRpcDispatcher.__call__()
    │
    ├──► ricerca nel registro handler

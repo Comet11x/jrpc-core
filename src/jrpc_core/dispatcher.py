@@ -81,6 +81,11 @@ class JsonRpcMethodWrapper:
         name: The JSON-RPC method name this wrapper is registered under.
     """
 
+    class _ParameterKind(Enum):
+        Regular = 1
+        VarPositional = 2
+        VarKeyword = 3
+
     def __init__(
         self,
         *,
@@ -107,9 +112,29 @@ class JsonRpcMethodWrapper:
                 become :attr:`JsonRpcErrorCode.ConversionError`.
         """
         self._name = name
+        self._signature = inspect.signature(method)
+        if self._has_positional_params():
+            self._kind = JsonRpcMethodWrapper._ParameterKind.VarPositional
+        elif self._has_variadic_keyword_parameter():
+            self._kind = JsonRpcMethodWrapper._ParameterKind.VarKeyword
+        else:
+            self._kind = JsonRpcMethodWrapper._ParameterKind.Regular
+
         self._method = _AsyncWrapper.wrap(method)
         self._validator: ValidatorType | None = validator
         self._converter = converter
+
+    def _has_positional_params(self):
+        for param in self._signature.parameters.values():
+            if param.kind != inspect.Parameter.VAR_POSITIONAL:
+                return False
+        return True
+
+    def _has_variadic_keyword_parameter(self):
+        for param in self._signature.parameters.values():
+            if param.kind != inspect.Parameter.VAR_KEYWORD:
+                return False
+        return True
 
     @property
     def name(self) -> str:
@@ -263,7 +288,18 @@ class JsonRpcMethodWrapper:
             ``Ok(result)`` on success, or ``Err(JsonRpcError)`` on failure.
         """
         try:
-            res = Ok(await self._method(params)).flatten()
+            if (
+                self._kind == JsonRpcMethodWrapper._ParameterKind.VarPositional
+                and isinstance(params, list)
+            ):
+                res = Ok(await self._method(*params)).flatten()
+            elif (
+                self._kind == JsonRpcMethodWrapper._ParameterKind.VarKeyword
+                and isinstance(params, dict)
+            ):
+                res = Ok(await self._method(**params)).flatten()
+            else:
+                res = Ok(await self._method(params)).flatten()
             if res.is_err() and not isinstance(res.unwrap_err(), JsonRpcError):
                 res = Err(JsonRpcErrorCode.ExecutionError.into(res.unwrap_err()))
             return res
@@ -556,15 +592,17 @@ class JsonRpcDispatcher:
         """
         self._registry[ctor.method] = (ctor.when, ctor)
 
-    @property
-    def request_handler_registry(self) -> JsonRpcHandlerCollection:
-        """Return the registry for request handlers."""
-        return self._request_handler_registry
+    def add_request_handler(
+        self,
+        handler: JsonRpcMethodWrapper,
+        response_ctor: JsonRpcResponseCtorWrapper | None = None,
+    ) -> bool:
+        status = self._request_handler_registry.add(handler)
 
-    @property
-    def notification_handler_registry(self) -> JsonRpcHandlerCollection:
-        """Return the registry for notification handlers."""
-        return self._notification_handler_registry
+        if status and isinstance(response_ctor, JsonRpcResponseCtorWrapper):
+            self.add_custom_response_ctor(response_ctor)
+
+        return status
 
     def emplace_request_handler(
         self,
@@ -573,6 +611,7 @@ class JsonRpcDispatcher:
         method: Callable[..., Any],
         validator: ValidatorType | None = None,
         converter: ConverterType | None = None,
+        response_ctor: JsonRpcResponseCtorWrapper | None = None,
     ) -> bool:
         """Register a request handler in one call.
 
@@ -590,11 +629,19 @@ class JsonRpcDispatcher:
         Returns:
             ``True`` if newly registered, ``False`` if the name already exists.
         """
-        return self._request_handler_registry.add(
+        status = self._request_handler_registry.add(
             JsonRpcMethodWrapper(
                 name=name, method=method, validator=validator, converter=converter
             )
         )
+
+        if status and isinstance(response_ctor, JsonRpcResponseCtorWrapper):
+            self.add_custom_response_ctor(response_ctor)
+
+        return status
+
+    def add_notification_handler(self, handler: JsonRpcMethodWrapper) -> bool:
+        return self._notification_handler_registry.add(handler)
 
     def emplace_notification_handler(
         self,
@@ -632,6 +679,7 @@ class JsonRpcDispatcher:
         method: str | None = None,
         validator: ValidatorType | None = None,
         converter: ConverterType | None = None,
+        response_ctor: JsonRpcResponseCtorWrapper | None = None,
     ) -> Callable[[Callable[[JsonRpcRequest], Any]], Callable[[JsonRpcRequest], Any]]:
         def decorator(
             fn: Callable[[JsonRpcRequest], Any],
@@ -644,10 +692,12 @@ class JsonRpcDispatcher:
                 name = method
 
             self.emplace_request_handler(
-                name=name, method=fn, validator=validator, converter=converter
+                name=name,
+                method=fn,
+                validator=validator,
+                converter=converter,
+                response_ctor=response_ctor,
             )
-            # def wrapper(*args, **kwarg):
-            #    return fn(*args, **kwarg)
             return fn
 
         return decorator
@@ -674,8 +724,6 @@ class JsonRpcDispatcher:
             self.emplace_notification_handler(
                 name=name, method=fn, validator=validator, converter=converter
             )
-            # def wrapper(*args, **kwarg):
-            #    return fn(*args, **kwarg)
             return fn
 
         return decorator
@@ -745,7 +793,6 @@ class JsonRpcDispatcher:
             else:
                 return Some(Err(JsonRpcError.from_error(data.unwrap_err())))
         else:
-            # TODO need to add an error for this case
             return Some(Err(JsonRpcErrorCode.InternalError.into()))
 
     async def _handle_notification(
